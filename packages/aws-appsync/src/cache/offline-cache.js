@@ -41,6 +41,12 @@ export default class MyCache extends InMemoryCache {
         });
     }
 
+    restore(data) {
+        super.restore(data);
+
+        this.store.dispatch(writeThunk(data));
+    }
+
     /**
      *
      * @param {Cache.WriteOptions} write

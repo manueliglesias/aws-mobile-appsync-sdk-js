@@ -10,6 +10,9 @@ import { readQueryFromStore, defaultNormalizedCacheFactory } from "apollo-cache-
 import { ApolloLink, Observable, Operation } from "apollo-link";
 import { getOperationDefinition, getOperationName } from "apollo-utilities";
 import { Store } from "redux";
+import { createPatch, applyPatch, createTests } from "rfc6902";
+import { ApolloError } from 'apollo-client';
+import { GraphQLError } from 'graphql';
 
 import { NORMALIZED_CACHE_KEY } from "../cache";
 
@@ -46,10 +49,19 @@ export class OfflineLink extends ApolloLink {
                 return () => null;
             }
 
+            const { cache } = operation.getContext();
+            let optimisticCacheData;
             if (isMutation) {
-                const { cache, optimisticResponse, AASContext: { doIt = false } = {} } = operation.getContext();
+                const { optimisticResponse, AASContext: { doIt = false } = {} } = operation.getContext();
+
+                const cacheData = cache.extract(false);
+                optimisticCacheData = cache.extract(true);
 
                 if (!doIt) {
+
+                    const patchRevertOptimistic = createPatch(optimisticCacheData, cacheData);
+                    const tests = createTests(optimisticCacheData, patchRevertOptimistic);
+
                     if (!optimisticResponse) {
                         console.warn('An optimisticResponse was not provided, it is required when using offline capabilities.');
 
@@ -59,9 +71,35 @@ export class OfflineLink extends ApolloLink {
 
                         // offline muation without optimistic response is processed immediately
                     } else {
-                        const data = enqueueMutation(operation, this.store, observer);
+                        const patches = [...tests, ...patchRevertOptimistic];
+                        const data = enqueueMutation(operation, patches, this.store, observer);
 
                         observer.next({ data });
+                        observer.complete();
+
+                        return () => null;
+                    }
+                } else {
+                    const { AASContext: { patch } } = operation.getContext();
+
+                    const patchResult = applyPatch(optimisticCacheData, patch).filter(r => r !== null);
+
+                    if (patchResult.length) {
+                        console.error('Error applying patches', patchResult);
+
+                        const error = new GraphQLError('Error applying patches');
+                        error.errorType = 'AWSAppSyncClient:ApplyPatchException';
+                        error.extensions = patchResult.reduce((acc, res) => {
+                            acc[res.name] = [...(acc[res.name] || []), res];
+
+                            return acc;
+                        }, {});
+
+                        const apolloError = new ApolloError({
+                            graphQLErrors: [error],
+                        });
+
+                        observer.error(apolloError);
                         observer.complete();
 
                         return () => null;
@@ -70,7 +108,13 @@ export class OfflineLink extends ApolloLink {
             }
 
             const handle = forward(operation).subscribe({
-                next: observer.next.bind(observer),
+                next(data) {
+                    if (optimisticCacheData) {
+                        cache.restore(optimisticCacheData);
+                    }
+
+                    observer.next(data);
+                },
                 error: observer.error.bind(observer),
                 complete: observer.complete.bind(observer),
             });
@@ -107,7 +151,7 @@ const processOfflineQuery = (operation, theStore) => {
  * @param {Operation} operation
  * @param {Store} theStore
  */
-const enqueueMutation = (operation, theStore, observer) => {
+const enqueueMutation = (operation, patch, theStore, observer) => {
     const { query: mutation, variables } = operation;
     const { cache, optimisticResponse, AASContext: { doIt = false, refetchQueries, update } = {} } = operation.getContext();
 
@@ -123,6 +167,7 @@ const enqueueMutation = (operation, theStore, observer) => {
                         refetchQueries,
                         update,
                         optimisticResponse,
+                        patch,
                     },
                     commit: { type: 'SOME_ACTION_COMMIT', meta: null },
                     rollback: { type: 'SOME_ACTION_ROLLBACK', meta: null },
@@ -142,9 +187,9 @@ const enqueueMutation = (operation, theStore, observer) => {
  */
 export const offlineEffect = (client, effect, action) => {
     const doIt = true;
-    const { ...otherOptions } = effect;
+    const { patch, ...otherOptions } = effect;
 
-    const context = { AASContext: { doIt } };
+    const context = { AASContext: { doIt, patch } };
 
     const options = {
         ...otherOptions,
@@ -159,14 +204,14 @@ export const reducer = () => ({
         const { type, payload } = action;
         switch (type) {
             case 'SOME_ACTION':
+                // increment counter    
                 return {
                     ...state,
                 };
             case 'SOME_ACTION_COMMIT':
-                return {
-                    ...state,
-                };
             case 'SOME_ACTION_ROLLBACK':
+                // decrement counter
+                // if 0, clear map
                 return {
                     ...state,
                 };
