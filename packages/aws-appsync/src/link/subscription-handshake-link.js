@@ -8,22 +8,7 @@
  */
 import { ApolloLink, Observable } from "apollo-link";
 
-import * as Paho from 'paho-client/src/mqttws31';
-
-const { MQTT: { Client } } = Paho;
-
-// super simple in-memory implementation of localStorage. Needed by Paho client on react-native
-if (!window.localStorage) {
-    window.localStorage = (() => {
-        const data = {}
-
-        return {
-            setItem: (key, item) => data[key] = item,
-            getItem: (key) => data[key],
-            removeItem: (key) => delete data[key],
-        };
-    })();
-}
+import { Client, Message } from '@manueliglesias/paho-mqtt';
 
 export class SubscriptionHandshakeLink extends ApolloLink {
 
@@ -168,7 +153,7 @@ export class SubscriptionHandshakeLink extends ApolloLink {
     connect = (observer, lastTopicObserver, connectionInfo) => {
         const { topics, client: clientId, url } = connectionInfo;
 
-        const client = new Paho.MQTT.Client(url, clientId);
+        const client = new Client(url, clientId);
         // client.trace = console.log.bind(null, clientId);
 
         client.onMessageArrived = ({ destinationName, payloadString }) => this.onMessage(destinationName, payloadString);
