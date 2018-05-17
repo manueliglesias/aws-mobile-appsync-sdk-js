@@ -5,8 +5,8 @@ import { PERSIST_REHYDRATE } from "@redux-offline/redux-offline/lib/constants";
 import thunk from 'redux-thunk';
 
 import { AWSAppSyncClient } from './client';
-import { reducer as cacheReducer, NORMALIZED_CACHE_KEY, LOCAL_ID_MAP_KEY } from './cache/index';
-import { reducer as commitReducer, offlineEffect, discard } from './link/offline-link';
+import { reducer as cacheReducer, NORMALIZED_CACHE_KEY } from './cache/index';
+import { reducer as commitReducer, offlineEffect, discard, METADATA_KEY } from './link/offline-link';
 
 /**
  * 
@@ -35,7 +35,7 @@ const newStore = (clientGetter = () => null, persistCallback = () => null, confl
                 ...offlineConfig,
                 persistCallback,
                 persistOptions: {
-                    whitelist: [NORMALIZED_CACHE_KEY, LOCAL_ID_MAP_KEY, 'offline']
+                    whitelist: [NORMALIZED_CACHE_KEY, METADATA_KEY, 'offline']
                 },
                 effect: (effect, action) => offlineEffect(store, clientGetter(), effect, action),
                 discard: discard(conflictResolver),

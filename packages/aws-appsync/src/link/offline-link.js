@@ -14,7 +14,9 @@ import { createPatch, applyPatch, createTests } from "rfc6902";
 import { ApolloError } from 'apollo-client';
 import { GraphQLError } from 'graphql';
 
-import { NORMALIZED_CACHE_KEY, defaultDataIdFromObject, LOCAL_ID_MAP_KEY } from "../cache";
+import { NORMALIZED_CACHE_KEY, defaultDataIdFromObject } from "../cache";
+
+export const METADATA_KEY = 'appsync:metadata';
 
 export class OfflineLink extends ApolloLink {
 
@@ -55,11 +57,12 @@ export class OfflineLink extends ApolloLink {
                 const { optimisticResponse, AASContext: { doIt = false } = {} } = operation.getContext();
 
                 const cacheData = cache.extract(false);
-                optimisticCacheData = {...cache.extract(true)};
+                optimisticCacheData = { ...cache.extract(true) };
 
                 if (!doIt) {
 
                     const patchRevertOptimistic = createPatch(optimisticCacheData, cacheData);
+                    // TODO: Use tests?? What about deletions? or updates via subscription msgs??
                     const tests = []; //createTests(optimisticCacheData, patchRevertOptimistic);
 
                     if (!optimisticResponse) {
@@ -71,7 +74,7 @@ export class OfflineLink extends ApolloLink {
 
                         // offline muation without optimistic response is processed immediately
                     } else {
-                        const patches = [...tests, ...patchRevertOptimistic];
+                        const patches = []; //[ ...tests, ...patchRevertOptimistic];
                         const data = enqueueMutation(operation, patches, this.store, observer);
 
                         observer.next({ data });
@@ -113,6 +116,7 @@ export class OfflineLink extends ApolloLink {
             const handle = forward(operation).subscribe({
                 next: (data) => {
                     if (optimisticCacheData) {
+                        // undo here??
                         cache.restore(optimisticCacheData);
                     }
 
@@ -197,9 +201,9 @@ export const offlineEffect = (store, client, effect, action) => {
 
     const context = { AASContext: { doIt, patch } };
 
-    const { [LOCAL_ID_MAP_KEY]: map } = store.getState();
-    const variables = replaceUsingMap({ ...origVars }, map);
-    const optimisticResponse = replaceUsingMap({ ...origOptimistic }, map);
+    const { [METADATA_KEY]: { localIdsMap } } = store.getState();
+    const variables = replaceUsingMap({ ...origVars }, localIdsMap);
+    const optimisticResponse = replaceUsingMap({ ...origOptimistic }, localIdsMap);
 
     const options = {
         ...otherOptions,
@@ -211,7 +215,9 @@ export const offlineEffect = (store, client, effect, action) => {
 }
 
 export const reducer = () => ({
-    [LOCAL_ID_MAP_KEY]: (state = {}, action) => {
+    [METADATA_KEY]: (state = {
+        localIdsMap: {},
+    }, action) => {
         const { type, payload, meta } = action;
 
         switch (type) {
@@ -223,7 +229,10 @@ export const reducer = () => ({
 
                 return {
                     ...state,
-                    ...entries,
+                    localIdsMap: {
+                        ...state.localIdsMap,
+                        ...entries,
+                    },
                 };
             case 'SOME_ACTION_COMMIT':
                 const { optimisticResponse } = meta;
@@ -238,7 +247,9 @@ export const reducer = () => ({
 
                 return {
                     ...state,
-                    ...mapped,
+                    localIdsMap: {
+                        ...mapped,
+                    },
                 };
             default:
                 return state;
@@ -337,6 +348,7 @@ const getIds = (obj, path = '', acc = {}) => {
         return acc;
     }
 
+    // TODO: use the one configured in the cache?
     const dataId = defaultDataIdFromObject(obj);
     if (dataId) {
         const [, id] = dataId.split(':');

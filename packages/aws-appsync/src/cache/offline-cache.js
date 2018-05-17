@@ -11,7 +11,6 @@ import { InMemoryCache, ApolloReducerConfig, NormalizedCache, defaultDataIdFromO
 import { Store, Action } from 'redux';
 
 export const NORMALIZED_CACHE_KEY = 'appsync';
-export const LOCAL_ID_MAP_KEY = 'appsync:local-id-map';
 
 export { defaultDataIdFromObject };
 
@@ -73,6 +72,60 @@ export default class MyCache extends InMemoryCache {
         this.store.dispatch(writeThunk(WRITE_CACHE_ACTION, {}));
 
         return super.reset();
+    }
+
+    // performTransaction(transaction) {
+    //     const x = c => {
+    //         console.log('doing transaction');
+    //         const proxy = new Proxy(c, {
+    //             get: (target, property, receiver) => {
+    //                 console.log(`Accessing ${property}`);
+    //                 return target[property];
+    //             }
+    //         });
+    //         return transaction(proxy)
+    //     };
+    //     // console.log('performTransaction', transaction);
+    //     return super.performTransaction(x);
+    // }
+
+    //recordOptimisticTransaction -> proxy?
+    //  markMutationResult
+    //removeOptimistic - override this -> proxy?
+
+    // write
+    // writeQuery
+    // writeFragment
+    // writeQuery(options) {
+    //     console.log('writeQuery', options);
+    //     super.writeQuery(options);
+    // }
+
+    recordOptimisticTransaction(transaction, id) {
+        const x = c => {
+            // console.log('doing transaction', id);
+            const proxy = new Proxy(c, {
+                get: (target, property, receiver) => {
+                    switch (property) {
+                        case 'writeQuery':
+                        // case 'write':
+                            // return (...args) => console.log(property, ...args);
+                            return (...args) => target[property].apply(target, args);
+                            // return (...args) => (console.log(property, ...args), target[property].apply(target, args));
+                    }
+                    return target[property];
+                }
+            });
+            return transaction(proxy)
+        };
+        return super.recordOptimisticTransaction(x, id);
+    
+    // this.data
+    // get this.optimistic.find(o => o.id === id) // {id, transaction, data}
+    }
+
+    removeOptimistic(id) {
+        return super.removeOptimistic(id);
     }
 }
 
