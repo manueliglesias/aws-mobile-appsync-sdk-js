@@ -6,7 +6,7 @@
  * or in the "license" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
-import { readQueryFromStore, defaultNormalizedCacheFactory } from "apollo-cache-inmemory";
+import { readQueryFromStore, defaultNormalizedCacheFactory, InMemoryCache } from "apollo-cache-inmemory";
 import { ApolloLink, Observable, Operation } from "apollo-link";
 import { getOperationDefinition, getOperationName } from "apollo-utilities";
 import { Store, combineReducers } from "redux";
@@ -155,7 +155,7 @@ const enqueueMutation = (operation, theStore, observer) => {
  */
 export const offlineEffect = (store, client, effect, action) => {
     const doIt = true;
-    const { variables: origVars = {}, optimisticResponse: origOptimistic, ...otherOptions } = effect;
+    const { variables: origVars = {}, optimisticResponse: origOptimistic, update: origUpdate, ...otherOptions } = effect;
 
     const context = { AASContext: { doIt } };
 
@@ -163,8 +163,34 @@ export const offlineEffect = (store, client, effect, action) => {
     const variables = replaceUsingMap({ ...origVars }, idsMap);
     const optimisticResponse = replaceUsingMap({ ...origOptimistic }, idsMap);
 
+    const update = (proxy, response) => {
+        debugger;
+        const { offline: { outbox }, [METADATA_KEY]: { snapshot: { cache } } } = store.getState();
+        const x = outbox.map((m, i) => {
+            const { meta: { offline: { effect: { update = () => { }, optimisticResponse, variables } } } } = m;
+            // TODO: replaceIds
+
+            return { update, response: i === 0 ? response : { data: optimisticResponse } };
+        });
+
+        const tempProxy = new InMemoryCache(client.cache.config);
+        tempProxy.restore({ ...cache });
+        x.forEach(({ update, response }) => {
+
+            try {
+                update.call(undefined, tempProxy, response);
+            } catch (e) {
+                console.error(e);
+            }
+        });
+
+        proxy.restore({ ...tempProxy.extract(true) });
+    };
+
     const options = {
         ...otherOptions,
+        optimisticResponse,
+        update,
         variables,
         context,
     };

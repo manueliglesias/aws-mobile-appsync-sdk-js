@@ -48,6 +48,7 @@ export default class MyCache extends InMemoryCache {
         this.store.dispatch(writeThunk(WRITE_CACHE_ACTION, data));
 
         super.restore(data);
+        debugger;
         super.broadcastWatches();
 
         return this;
@@ -74,9 +75,9 @@ export default class MyCache extends InMemoryCache {
         return super.reset();
     }
 
-    recordOptimisticTransaction(transaction, id) {
-        return;
-    }
+    // recordOptimisticTransaction(transaction, id) {
+    //     return;
+    // }
 }
 
 const writeThunk = (type, payload) => (dispatch) => {

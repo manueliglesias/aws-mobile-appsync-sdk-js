@@ -150,6 +150,12 @@ class AWSAppSyncClient extends ApolloClient {
         this.hydratedPromise = disableOffline ? Promise.resolve(this) : new Promise(resolve => resolveClient = resolve);
         this._disableOffline = disableOffline;
         this._store = store;
+
+        if (store) {
+            store.subscribe((...args) => {
+                console.log(...args);
+            });
+        }
     }
 
     /**
@@ -176,21 +182,23 @@ class AWSAppSyncClient extends ApolloClient {
 
         const newOptions = {
             ...otherOptions,
-            optimisticResponse: doIt ? null : data,
+            optimisticResponse: data,
             update,
             ...(doIt ? { refetchQueries } : {}),
             context,
         }
 
         if (!this._disableOffline) {
+            // Create cache snapshot if this is the first enqueed mutation
             boundStartMutation(this._store, this.cache);
 
             if (doIt) {
-                const { [METADATA_KEY]: { snapshot: { cache } } } = this._store.getState();
+                const { [METADATA_KEY]: { snapshot: { cache: cacheCopy } } } = this._store.getState();
 
                 // disable broadcastEvents
-                this.queryManager.broadcastQueries = () => { };
-                this.cache.restore(cache);
+                // this.queryManager.broadcastQueries = () => { };
+                // this.cache.restore(cacheCopy);
+                // this.cache.restore({ ...cacheCopy });
             }
         }
 
@@ -198,19 +206,22 @@ class AWSAppSyncClient extends ApolloClient {
             return await super.mutate(newOptions);
         } finally {
             if (!this._disableOffline) {
-                const { [METADATA_KEY]: { snapshot: { enqueuedMutations, cache } } } = this._store.getState();
+                const { [METADATA_KEY]: { snapshot: { enqueuedMutations, cache: cacheCopy } } } = this._store.getState();
 
                 const isLastMutation = enqueuedMutations === 1;
                 if (doIt && isLastMutation) {
-                    this.cache.restore(cache);
+                    // this.cache.restore(cacheCopy);
+                    // this.cache.restore({ ...cacheCopy });
 
                     // re-enable broadcastEvents and call it
-                    this.queryManager.broadcastQueries = this._origBroadcastQueries;
-                    this.queryManager.broadcastQueries();
+                    // this.queryManager.broadcastQueries = this._origBroadcastQueries;
+                    // this.queryManager.broadcastQueries();
                 }
             }
         }
     }
+
+    _p;
 
 }
 
