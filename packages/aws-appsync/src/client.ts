@@ -26,7 +26,7 @@ import {
     ComplexObjectLink,
     AUTH_TYPE
 } from './link';
-import { createStore } from './store';
+import { createStore } from './offline-store/store';
 import { ApolloCache } from 'apollo-cache';
 import { AuthOptions } from './link/auth-link';
 import { ConflictResolutionInfo } from './link/offline-link';
