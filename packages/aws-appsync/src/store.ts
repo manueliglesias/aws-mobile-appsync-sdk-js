@@ -1,4 +1,4 @@
-import { Action, applyMiddleware, createStore, compose, combineReducers, Store } from 'redux';
+import { applyMiddleware, createStore, compose, combineReducers, Store } from 'redux';
 import { offline } from '@redux-offline/redux-offline';
 import offlineConfig from '@redux-offline/redux-offline/lib/defaults';
 import { PERSIST_REHYDRATE } from "@redux-offline/redux-offline/lib/constants";
@@ -6,15 +6,14 @@ import thunk from 'redux-thunk';
 
 import { AWSAppSyncClient } from './client';
 import { reducer as cacheReducer, NORMALIZED_CACHE_KEY, METADATA_KEY } from './cache/index';
-import { reducer as offlineMetadataReducer, offlineEffect, discard } from './link/offline-link';
+import { reducer as offlineMetadataReducer, offlineEffect, discard, ConflictResolver } from './link/offline-link';
 
-/**
- * 
- * @param {() => AWSAppSyncClient} clientGetter
- * @param {Function} persistCallback 
- * @param {Function} conflictResolver 
- */
-const newStore = (clientGetter = () => null, persistCallback = () => null, conflictResolver, dataIdFromObject) => {
+const newStore = <TCacheShape>(
+    clientGetter: () => AWSAppSyncClient<TCacheShape> = () => null,
+    persistCallback = () => null,
+    conflictResolver: ConflictResolver,
+    dataIdFromObject: (obj) => string | null
+): Store<any> => {
     const store = createStore(
         combineReducers({
             rehydrated: (state = false, action) => {
