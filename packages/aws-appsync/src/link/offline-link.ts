@@ -6,8 +6,8 @@
  * or in the "license" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
-import { readQueryFromStore, defaultNormalizedCacheFactory } from "apollo-cache-inmemory";
-import { ApolloLink, Observable, Operation, execute, GraphQLRequest, NextLink } from "apollo-link";
+import { readQueryFromStore, defaultNormalizedCacheFactory, NormalizedCacheObject } from "apollo-cache-inmemory";
+import { ApolloLink, Observable, Operation, execute, GraphQLRequest, NextLink, FetchResult } from "apollo-link";
 import { getOperationDefinition, getOperationName, getMutationDefinition, resultKeyNameFromField, tryFunctionOrLogError } from "apollo-utilities";
 import { PERSIST_REHYDRATE } from "@redux-offline/redux-offline/lib/constants";
 import { OfflineAction } from "@redux-offline/redux-offline/lib/types";
@@ -18,8 +18,9 @@ import { AWSAppsyncGraphQLError } from "../types";
 import { Observer } from "apollo-client/util/Observable";
 import { Store } from "redux";
 import { OfflineCache } from "../cache/offline-cache";
-import { ApolloClient } from "apollo-client";
 import { isUuid } from "../utils";
+import AWSAppSyncClient from "..";
+import { ApolloCache } from "apollo-cache";
 
 const actions = {
     SAVE_SNAPSHOT: 'SAVE_SNAPSHOT',
@@ -41,7 +42,7 @@ export class OfflineLink extends ApolloLink {
     request(operation: Operation, forward: NextLink) {
         return new Observable(observer => {
             const { offline: { online } } = this.store.getState();
-            const { operation: operationType, name } = getOperationDefinition(operation.query);
+            const { operation: operationType } = getOperationDefinition(operation.query);
             const isMutation = operationType === 'mutation';
             const isQuery = operationType === 'query';
 
@@ -57,24 +58,7 @@ export class OfflineLink extends ApolloLink {
             if (isMutation) {
                 const { AASContext: { doIt = false } = {}, cache } = operation.getContext();
 
-                if (doIt) {
-                    const { cache, AASContext: { client } } = operation.getContext();
-
-                    if (client && client.queryManager) {
-                        const { [METADATA_KEY]: { snapshot: { cache: cacheSnapshot } } } = this.store.getState();
-
-                        client.queryManager.broadcastQueries = () => { };
-
-                        const silenceBroadcast = cache.silenceBroadcast;
-                        cache.silenceBroadcast = true;
-
-                        cache.restore({ ...cacheSnapshot });
-
-                        cache.silenceBroadcast = silenceBroadcast;
-                    }
-                }
-
-                if (!doIt || !online) {
+                if (!doIt) {
                     const { [METADATA_KEY]: { snapshot: { enqueuedMutations } } } = this.store.getState();
 
                     if (enqueuedMutations === 0) {
@@ -86,51 +70,16 @@ export class OfflineLink extends ApolloLink {
                     observer.next({ data });
                     // We intentionally don't call complete()
 
-                    if (!online) {
-                        observer.complete();
-                    }
+                    // if (!online) {
+                    //     observer.complete();
+                    // }
 
                     return () => null;
                 }
             }
 
             const handle = forward(operation).subscribe({
-                next: data => {
-                    if (isMutation) {
-                        const { optimisticResponse, AASContext: { client } } = operation.getContext();
-                        const {
-                            offline: { outbox: [, ...enquededMutations] },
-                        } = this.store.getState();
-
-                        // persist canonical snapshot
-                        boundSaveSnapshot(this.store, client.cache);
-
-                        // Save map of client ids with server ids
-                        const { data: operationData } = data;
-                        boundSaveServerId(this.store, optimisticResponse, operationData);
-
-                        const { [METADATA_KEY]: { idsMap } } = this.store.getState();
-
-                        enquededMutations.forEach(({ meta: { offline: { effect } } }) => {
-                            const { update, optimisticResponse: origOptimisticResponse } = effect as any;
-
-                            if (typeof update !== 'function') {
-                                return;
-                            }
-
-                            const optimisticResponse = replaceUsingMap({ ...origOptimisticResponse }, idsMap);
-
-                            tryFunctionOrLogError(() => {
-                                update(client.cache, { data: optimisticResponse });
-                            });
-                        });
-
-                        client.queryManager.broadcastQueries = client.origBroadcastQueries;
-                        client.queryManager.broadcastQueries();
-                    }
-
-                    observer.next(data);
-                },
+                next: observer.next.bind(observer),
                 error: observer.error.bind(observer),
                 complete: observer.complete.bind(observer),
             });
@@ -171,7 +120,7 @@ type EnqueuedMutationEffect = {
 
 const enqueueMutation = (operation: Operation, theStore: Store<OfflineCache>, observer: Observer<any>): object => {
     const { query: mutation, variables } = operation;
-    const { optimisticResponse: origOptimistic } = operation.getContext();
+    const { AASContext: { optimisticResponse: origOptimistic } } = operation.getContext();
 
     const optimisticResponse = typeof origOptimistic === 'function' ? origOptimistic(variables) : origOptimistic;
 
@@ -207,37 +156,95 @@ const enqueueMutation = (operation: Operation, theStore: Store<OfflineCache>, ob
         }, {});
     }
 
+    console.log('Mutation enqueued', { result });
     return result;
 }
 
-export const offlineEffect = <TCache>(store: Store<OfflineCache>, client: ApolloClient<TCache>, effect: EnqueuedMutationEffect, action: OfflineAction): Promise<any> => {
+interface CanBeSilenced<TCache> extends ApolloCache<TCache> {
+    silenceBroadcast?: boolean
+};
+
+export const offlineEffect = async <TCache>(
+    store: Store<OfflineCache>,
+    client: AWSAppSyncClient<TCache>,
+    effect: EnqueuedMutationEffect,
+    action: OfflineAction
+): Promise<FetchResult<Record<string, any>, Record<string, any>>> => {
+    const { cache }: { cache: CanBeSilenced<TCache> } = client;
     const doIt = true;
-    const { optimisticResponse: origOptimistic, operation: origOperation, operation: { variables: origVars }, observer } = effect;
+    const { optimisticResponse: origOptimistic, operation: { variables: origVars, query: mutation }, observer } = effect;
+
+    await client.hydrated();
+
+    debugger;
 
     const { [METADATA_KEY]: { idsMap } } = store.getState();
     const variables = replaceUsingMap({ ...origVars }, idsMap);
     const optimisticResponse = replaceUsingMap({ ...origOptimistic }, idsMap);
 
-    const buildOperationForLink: Function = Reflect.get(client.queryManager, 'buildOperationForLink');
-    const operation = buildOperationForLink.call(client.queryManager, origOperation.query, variables, {
-        ...origOperation.context,
-        ...{ AASContext: { doIt, client } },
-        optimisticResponse,
+    // disable broadcast queries
+    if (client && client.queryManager) {
+        const { [METADATA_KEY]: { snapshot: { cache: cacheSnapshot } } } = store.getState();
+
+        client.queryManager.broadcastQueries = () => { };
+
+        const silenceBroadcast = cache.silenceBroadcast;
+        cache.silenceBroadcast = true;
+
+        console.log('Restoring snapshot', { cacheSnapshot });
+        cache.restore({ ...(cacheSnapshot as any) });
+
+        cache.silenceBroadcast = silenceBroadcast;
+    }
+
+    const context = {
+        AASContext: {
+            doIt
+        }
+    };
+
+    const result = await client.queryManager.mutate({
+        mutation,
+        variables,
+        context,
+        // update,
+        // refetchQueries,
+        // updateQueries,
     });
 
-    return new Promise((resolve, reject) => {
-        execute(client.link, operation).subscribe({
-            next: data => {
-                observer.next(data);
-                resolve(data);
-            },
-            error: errorValue => {
-                observer.error(errorValue);
-                reject(errorValue);
-            },
-            complete: observer.complete.bind(observer),
+    const {
+        offline: { outbox: [, ...enquededMutations] },
+    } = store.getState();
+
+    // persist canonical snapshot
+    boundSaveSnapshot(store, cache);
+
+    // Save map of client ids with server ids
+    const { data: operationData } = result;
+    boundSaveServerId(store, optimisticResponse, operationData);
+
+    enquededMutations.forEach(({ meta: { offline: { effect } } }) => {
+        const { update, optimisticResponse: origOptimisticResponse } = effect as any;
+
+        if (typeof update !== 'function') {
+            return;
+        }
+
+        const optimisticResponse = replaceUsingMap({ ...origOptimisticResponse }, idsMap);
+
+        tryFunctionOrLogError(() => {
+            update(cache, { data: optimisticResponse });
         });
     });
+
+    client.queryManager.broadcastQueries = client.origBroadcastQueries;
+    client.queryManager.broadcastQueries();
+
+
+    observer.next(result);
+    observer.complete();
+
+    return result;
 }
 
 export const reducer = dataIdFromObject => ({
@@ -296,8 +303,11 @@ const cacheSnapshotReducer = (state = {}, action) => {
     switch (type) {
         case actions.SAVE_SNAPSHOT:
             const { cache } = payload;
+            const cacheContents = { ...cache.extract(false) };
 
-            return { ...cache.extract(false) };
+            console.log('Saving snapshot', cacheContents);
+
+            return cacheContents;
         default:
             return state;
     }
@@ -356,6 +366,7 @@ export interface ConflictResolutionInfo {
 export type ConflictResolver = (obj: ConflictResolutionInfo) => 'DISCARD' | boolean;
 
 export const discard = (fn: ConflictResolver = () => 'DISCARD') => (error, action, retries) => {
+    debugger;
     const { graphQLErrors = [] }: { graphQLErrors: AWSAppsyncGraphQLError[] } = error;
     const conditionalCheck = graphQLErrors.find(err => err.errorType === 'DynamoDB:ConditionalCheckFailedException');
 

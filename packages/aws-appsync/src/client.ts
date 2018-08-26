@@ -7,9 +7,9 @@
  * KIND, express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
 import 'setimmediate';
-import ApolloClient, { ApolloClientOptions } from 'apollo-client';
+import ApolloClient, { ApolloClientOptions, MutationOptions, OperationVariables } from 'apollo-client';
 import { InMemoryCache, ApolloReducerConfig } from 'apollo-cache-inmemory';
-import { ApolloLink, Observable } from 'apollo-link';
+import { ApolloLink, Observable, FetchResult } from 'apollo-link';
 import { HttpLink } from 'apollo-link-http';
 import { getMainDefinition } from 'apollo-utilities';
 import { Store } from 'redux';
@@ -191,6 +191,40 @@ class AWSAppSyncClient<TCacheShape> extends ApolloClient<TCacheShape> {
 
     isOfflineEnabled() {
         return !this._disableOffline;
+    }
+
+    mutate<T, TVariables = OperationVariables>(options: MutationOptions<T, TVariables>): Promise<FetchResult<T>> {
+        if (!this.isOfflineEnabled()) {
+            return super.mutate(options);
+        }
+
+        const doIt = false;
+        const {
+            context: origContext,
+            mutation,
+            variables,
+            optimisticResponse,
+            update,
+            updateQueries,
+            refetchQueries,
+        } = options;
+
+        const context = {
+            ...origContext,
+            AASContext: {
+                optimisticResponse,
+                updateQueries,
+                update,
+                doIt,
+                refetchQueries,
+            }
+        };
+
+        return super.mutate({
+            mutation,
+            variables,
+            context,
+        });
     }
 
 }
