@@ -10,7 +10,7 @@ import 'setimmediate';
 import ApolloClient, { ApolloClientOptions, MutationOptions, OperationVariables } from 'apollo-client';
 import { InMemoryCache, ApolloReducerConfig } from 'apollo-cache-inmemory';
 import { ApolloLink, FetchResult, Observable } from 'apollo-link';
-import { HttpLink } from 'apollo-link-http';
+import { createHttpLink } from 'apollo-link-http';
 import { getMainDefinition, getOperationDefinition, variablesInOperation, tryFunctionOrLogError } from 'apollo-utilities';
 import { Store } from 'redux';
 
@@ -35,7 +35,7 @@ import { OperationDefinitionNode } from 'graphql';
 
 export { defaultDataIdFromObject };
 
-export const createSubscriptionHandshakeLink = (url, resultsFetcherLink = new HttpLink({ uri: url })) => {
+export const createSubscriptionHandshakeLink = (url, resultsFetcherLink = createHttpLink({ uri: url })) => {
     return ApolloLink.split(
         operation => {
             const { query } = operation;
@@ -61,7 +61,7 @@ export const createAppSyncLink = ({
     region,
     auth,
     complexObjectsCredentials,
-    resultsFetcherLink = new HttpLink({ uri: url }),
+    resultsFetcherLink = createHttpLink({ uri: url }),
 }) => {
     const link = ApolloLink.from([
         createLinkWithStore((store) => new OfflineLink(store)),
@@ -151,10 +151,10 @@ class AWSAppSyncClient<TCacheShape> extends ApolloClient<TCacheShape> {
         const dataIdFromObject = disableOffline ? () => { } : cacheOptions.dataIdFromObject || defaultDataIdFromObject;
         const store = disableOffline ? null : createStore(() => this, () => resolveClient(this), conflictResolver, dataIdFromObject);
         const cache: ApolloCache<any> = disableOffline ? (customCache || new InMemoryCache(cacheOptions)) : new OfflineCache(store, cacheOptions);
-
+        
         const waitForRehydrationLink = new ApolloLink((op, forward) => {
             let handle = null;
-
+            
             return new Observable(observer => {
                 this.hydratedPromise.then(() => {
                     handle = passthrough(op, forward).subscribe(observer);
