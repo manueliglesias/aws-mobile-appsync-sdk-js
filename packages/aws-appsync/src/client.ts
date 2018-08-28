@@ -151,10 +151,10 @@ class AWSAppSyncClient<TCacheShape> extends ApolloClient<TCacheShape> {
         const dataIdFromObject = disableOffline ? () => { } : cacheOptions.dataIdFromObject || defaultDataIdFromObject;
         const store = disableOffline ? null : createStore(() => this, () => resolveClient(this), conflictResolver, dataIdFromObject);
         const cache: ApolloCache<any> = disableOffline ? (customCache || new InMemoryCache(cacheOptions)) : new OfflineCache(store, cacheOptions);
-        
+
         const waitForRehydrationLink = new ApolloLink((op, forward) => {
             let handle = null;
-            
+
             return new Observable(observer => {
                 this.hydratedPromise.then(() => {
                     handle = passthrough(op, forward).subscribe(observer);
@@ -224,9 +224,25 @@ class AWSAppSyncClient<TCacheShape> extends ApolloClient<TCacheShape> {
 
         let result = null;
         try {
-            result = await super.mutate(newOptions);
+            if (!doIt && !this._disableOffline) {
+                debugger;
 
-            return result;
+                result = new Promise((resolve, reject) => {
+                    newOptions.context.AASContext.promise = {
+                        resolve, reject
+                    };
+
+                    debugger;
+                    return super.mutate(newOptions);
+                });
+
+                debugger;
+            } else {
+                result = super.mutate(newOptions);
+            }
+
+            debugger;
+            return await result;
         } finally {
             if (!this._disableOffline) {
                 if (doIt && result && result.data) {

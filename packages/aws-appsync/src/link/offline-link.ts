@@ -57,7 +57,7 @@ export class OfflineLink extends ApolloLink {
             }
 
             if (isMutation) {
-                const { optimisticResponse, AASContext: { doIt = false } = {} } = operation.getContext();
+                const { optimisticResponse, AASContext: { doIt = false, promise: { resolve = null } } = { promise: {} } } = operation.getContext();
 
                 if (!doIt) {
                     if (!optimisticResponse) {
@@ -69,6 +69,10 @@ export class OfflineLink extends ApolloLink {
                     }
 
                     const data = enqueueMutation(operation, this.store);
+
+                    if (resolve && !online) {
+                        resolve({ data });
+                    }
 
                     observer.next({ data });
                     observer.complete();
@@ -96,6 +100,7 @@ export class OfflineLink extends ApolloLink {
                         }
                     }
 
+                    debugger;
                     observer.next(data);
                 },
                 error: observer.error.bind(observer),
@@ -142,7 +147,7 @@ const processOfflineQuery = (operation, theStore) => {
 const enqueueMutation = (operation, theStore): object => {
     const { query: mutation, variables } = operation;
     const { optimisticResponse,
-        AASContext: { refetchQueries = undefined, update = undefined } = {}
+        AASContext: { refetchQueries = undefined, update = undefined, promise = {} } = {}
     } = operation.getContext();
 
     setImmediate(() => {
@@ -157,6 +162,7 @@ const enqueueMutation = (operation, theStore): object => {
                         refetchQueries,
                         update,
                         optimisticResponse,
+                        promise,
                     },
                     commit: { type: actions.COMMIT, meta: { optimisticResponse } },
                     rollback: { type: actions.ROLLBACK },
@@ -188,11 +194,11 @@ const enqueueMutation = (operation, theStore): object => {
  * @param {*} effect
  * @param {*} action
  */
-export const offlineEffect = (store, client, effect, action) => {
+export const offlineEffect = async (store, client, effect, action) => {
     const doIt = true;
-    const { variables: origVars = {}, optimisticResponse: origOptimistic, ...otherOptions } = effect;
+    const { variables: origVars = {}, optimisticResponse: origOptimistic, promise, promise: { resolve, reject }, ...otherOptions } = effect;
 
-    const context = { AASContext: { doIt } };
+    const context = { AASContext: { doIt, promise } };
 
     const { [METADATA_KEY]: { idsMap } } = store.getState();
     const variables = replaceUsingMap({ ...origVars }, idsMap);
@@ -205,7 +211,18 @@ export const offlineEffect = (store, client, effect, action) => {
         context,
     };
 
-    return client.mutate(options);
+    try {
+        const result = await client.mutate(options);
+
+        resolve(result);
+
+        return result;
+    } catch (error) {
+        // reject(error);
+
+        throw error;
+        // return Promise.reject(error);
+    }
 }
 
 export const reducer = dataIdFromObject => ({
@@ -325,6 +342,20 @@ export interface ConflictResolutionInfo {
 }
 
 export const discard = (fn = (obj: ConflictResolutionInfo) => 'DISCARD') => (error, action, retries) => {
+    const { meta: { offline: { effect: { promise: { reject } } } } } = action;
+
+    const discard = _discard(fn, error, action, retries);
+
+    if (discard && reject) {
+        debugger;
+        console.error('rejecting', error);
+        reject(error);
+    }
+
+    return discard;
+};
+
+const _discard = (fn = (obj: ConflictResolutionInfo) => 'DISCARD', error, action, retries) => {
     const { graphQLErrors = [] }: { graphQLErrors: AWSAppsyncGraphQLError[] } = error;
     const conditionalCheck = graphQLErrors.find(err => err.errorType === 'DynamoDB:ConditionalCheckFailedException');
 

@@ -8,6 +8,17 @@ import { AWSAppSyncClient } from './client';
 import { reducer as cacheReducer, NORMALIZED_CACHE_KEY, METADATA_KEY } from './cache/index';
 import { reducer as offlineMetadataReducer, offlineEffect, discard } from './link/offline-link';
 
+const cosa = store => next => action => { 
+    console.warn(action.type);
+    if (action.type === 'ROLLBACK_OFFLINE_MUTATION') {
+        console.warn(action);
+        throw new Error(action.type);
+    }
+    const result = next(action);
+
+    return result;
+}
+
 /**
  * 
  * @param {() => AWSAppSyncClient} clientGetter
@@ -30,7 +41,7 @@ const newStore = (clientGetter = () => null, persistCallback = () => null, confl
         }),
         typeof window !== 'undefined' && (window as any).__REDUX_DEVTOOLS_EXTENSION__ && (window as any).__REDUX_DEVTOOLS_EXTENSION__(),
         compose(
-            applyMiddleware(thunk),
+            applyMiddleware(thunk, cosa),
             offline({
                 ...offlineConfig,
                 persistCallback,
