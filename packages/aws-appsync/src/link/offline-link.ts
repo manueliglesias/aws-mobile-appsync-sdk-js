@@ -11,7 +11,7 @@ import { ApolloLink, Observable, Operation, execute, GraphQLRequest, NextLink, F
 import { getOperationDefinition, getOperationName, getMutationDefinition, resultKeyNameFromField, tryFunctionOrLogError } from "apollo-utilities";
 import { PERSIST_REHYDRATE } from "@redux-offline/redux-offline/lib/constants";
 import { OfflineAction } from "@redux-offline/redux-offline/lib/types";
-import { DocumentNode, FieldNode } from "graphql";
+import { DocumentNode, FieldNode, ExecutionResult } from "graphql";
 
 import { NORMALIZED_CACHE_KEY, METADATA_KEY } from "../cache";
 import { AWSAppsyncGraphQLError } from "../types";
@@ -21,6 +21,9 @@ import { OfflineCache } from "../cache/offline-cache";
 import { isUuid } from "../utils";
 import AWSAppSyncClient from "..";
 import { ApolloCache } from "apollo-cache";
+import { MutationUpdaterFn, MutationQueryReducersMap } from "apollo-client";
+import { RefetchQueryDescription } from "apollo-client/core/watchQueryOptions";
+import { offline } from "@redux-offline/redux-offline";
 
 const actions = {
     SAVE_SNAPSHOT: 'SAVE_SNAPSHOT',
@@ -65,14 +68,21 @@ export class OfflineLink extends ApolloLink {
                         boundSaveSnapshot(this.store, cache);
                     }
 
-                    const data = enqueueMutation(operation, this.store, observer);
+                    const data = enqueueMutation(operation, this.store);
 
                     observer.next({ data });
-                    // We intentionally don't call complete()
+                    observer.complete();
 
-                    // if (!online) {
-                    //     observer.complete();
-                    // }
+                    if (!online) {
+                        const {
+                            AASContext: {
+                                promise: { resolve },
+                            }
+                        } = operation.getContext();
+
+                        debugger;
+                        resolve({ data });
+                    }
 
                     return () => null;
                 }
@@ -112,15 +122,29 @@ const processOfflineQuery = (operation: Operation, theStore: Store<OfflineCache>
     return data;
 }
 
-type EnqueuedMutationEffect = {
+type EnqueuedMutationEffect<T> = {
     optimisticResponse: object,
-    observer: Observer<any>,
     operation: GraphQLRequest,
+    update: MutationUpdaterFn<T>,
+    updateQueries: MutationQueryReducersMap<T>,
+    refetchQueries: ((result: ExecutionResult) => RefetchQueryDescription) | RefetchQueryDescription,
+    promise: {
+        resolve: (val: Record<string, T>) => void,
+        reject: (val: Record<string, T>) => void,
+    },
 };
 
-const enqueueMutation = (operation: Operation, theStore: Store<OfflineCache>, observer: Observer<any>): object => {
+const enqueueMutation = (operation: Operation, theStore: Store<OfflineCache>): object => {
     const { query: mutation, variables } = operation;
-    const { AASContext: { optimisticResponse: origOptimistic } } = operation.getContext();
+    const {
+        AASContext: {
+            optimisticResponse: origOptimistic,
+            update,
+            updateQueries,
+            refetchQueries,
+            promise,
+        }
+    } = operation.getContext();
 
     const optimisticResponse = typeof origOptimistic === 'function' ? origOptimistic(variables) : origOptimistic;
 
@@ -132,9 +156,12 @@ const enqueueMutation = (operation: Operation, theStore: Store<OfflineCache>, ob
                 offline: {
                     effect: {
                         optimisticResponse,
-                        observer,
                         operation,
-                    } as EnqueuedMutationEffect,
+                        update,
+                        updateQueries,
+                        refetchQueries,
+                        promise,
+                    } as EnqueuedMutationEffect<any>,
                     commit: { type: actions.COMMIT },
                     rollback: { type: actions.ROLLBACK },
                 }
@@ -167,12 +194,19 @@ interface CanBeSilenced<TCache> extends ApolloCache<TCache> {
 export const offlineEffect = async <TCache>(
     store: Store<OfflineCache>,
     client: AWSAppSyncClient<TCache>,
-    effect: EnqueuedMutationEffect,
+    effect: EnqueuedMutationEffect<any>,
     action: OfflineAction
 ): Promise<FetchResult<Record<string, any>, Record<string, any>>> => {
     const { cache }: { cache: CanBeSilenced<TCache> } = client;
     const doIt = true;
-    const { optimisticResponse: origOptimistic, operation: { variables: origVars, query: mutation }, observer } = effect;
+    const {
+        optimisticResponse: origOptimistic,
+        operation: { variables: origVars, query: mutation },
+        update,
+        updateQueries,
+        refetchQueries,
+        promise: { resolve = null } = {}
+    } = effect;
 
     await client.hydrated();
 
@@ -203,14 +237,16 @@ export const offlineEffect = async <TCache>(
         }
     };
 
+    debugger;
     const result = await client.queryManager.mutate({
         mutation,
         variables,
         context,
-        // update,
-        // refetchQueries,
-        // updateQueries,
+        update,
+        refetchQueries,
+        updateQueries,
     });
+    debugger;
 
     const {
         offline: { outbox: [, ...enquededMutations] },
@@ -240,9 +276,9 @@ export const offlineEffect = async <TCache>(
     client.queryManager.broadcastQueries = client.origBroadcastQueries;
     client.queryManager.broadcastQueries();
 
-
-    observer.next(result);
-    observer.complete();
+    if (resolve) {
+        resolve(result);
+    }
 
     return result;
 }
@@ -366,6 +402,17 @@ export interface ConflictResolutionInfo {
 export type ConflictResolver = (obj: ConflictResolutionInfo) => 'DISCARD' | boolean;
 
 export const discard = (fn: ConflictResolver = () => 'DISCARD') => (error, action, retries) => {
+    const discardResult = _discard(fn, error, action, retries);
+
+    if (discardResult) {
+        console.log(action);
+        debugger;
+        const { } = action;
+    }
+
+    return discardResult;
+}
+const _discard = (fn: ConflictResolver = () => 'DISCARD', error, action, retries) => {
     debugger;
     const { graphQLErrors = [] }: { graphQLErrors: AWSAppsyncGraphQLError[] } = error;
     const conditionalCheck = graphQLErrors.find(err => err.errorType === 'DynamoDB:ConditionalCheckFailedException');
