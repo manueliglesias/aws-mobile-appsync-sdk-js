@@ -123,6 +123,7 @@ class AWSAppSyncClient<TCacheShape> extends ApolloClient<TCacheShape> {
     };
 
     private _disableOffline: boolean;
+    private _store: Store<OfflineCacheType>;
     private _origBroadcastQueries: () => void;
 
     public get origBroadcastQueries() { return this._origBroadcastQueries };
@@ -187,6 +188,7 @@ class AWSAppSyncClient<TCacheShape> extends ApolloClient<TCacheShape> {
 
         this.hydratedPromise = disableOffline ? Promise.resolve(this) : new Promise(resolve => { resolveClient = resolve; });
         this._disableOffline = disableOffline;
+        this._store = store;
     }
 
     isOfflineEnabled() {
@@ -209,33 +211,27 @@ class AWSAppSyncClient<TCacheShape> extends ApolloClient<TCacheShape> {
             refetchQueries,
         } = options;
 
-        return new Promise((resolve, reject) => {
-            const promise = { resolve, reject };
-
-            const context = {
-                ...origContext,
-                AASContext: {
-                    doIt,
-                    optimisticResponse,
-                    update,
-                    updateQueries,
-                    refetchQueries,
-                    promise,
-                }
-            };
-            
-            super.mutate({
-                mutation,
-                variables,
-                context,
+        const context = {
+            ...origContext,
+            AASContext: {
+                doIt,
+                optimisticResponse,
                 update,
                 updateQueries,
                 refetchQueries,
-            });
+            }
+        };
+
+        return super.mutate({
+            mutation,
+            optimisticResponse,
+            variables,
+            context,
+            update,
+            updateQueries,
+            refetchQueries,
         });
-
     }
-
 }
 
 export default AWSAppSyncClient;

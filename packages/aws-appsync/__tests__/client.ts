@@ -3,6 +3,8 @@ import { v4 as uuid } from "uuid";
 import { Observable } from "apollo-link";
 import { createHttpLink } from "apollo-link-http";
 import { AWSAppSyncClientOptions, AWSAppSyncClient, AUTH_TYPE } from "../src/client";
+import { Store } from "redux";
+import { OfflineCache } from "../src/cache/offline-cache";
 
 jest.mock('apollo-link-http-common', () => ({
     checkFetcher: () => { },
@@ -14,16 +16,31 @@ jest.mock('apollo-link-http', () => ({
 
 let setNetworkOnlineStatus: (online: boolean) => void;
 jest.mock("@redux-offline/redux-offline/lib/defaults/detectNetwork", () => (callback) => {
-    setNetworkOnlineStatus = online => callback({ online });
+    setNetworkOnlineStatus = online => {
+        setTimeout(() => callback({ online }), 0);
+    };
 
-    return callback({
-        online: true
-    });
+    // Setting initial network online status
+    callback({ online: true });
 });
 
-const mockHttpResponse = resp => {
-    (createHttpLink as jest.Mock).mockImplementation(() => ({
-        request: () => Observable.of({ ...resp })
+const getStoreState = <T>(client: AWSAppSyncClient<T>) => ((client as any)._store as Store<OfflineCache>).getState();
+
+const isNetworkOnline = <T>(client: AWSAppSyncClient<T>) => getStoreState(client).offline.online;
+
+const getOutbox = <T>(client: AWSAppSyncClient<T>) => getStoreState(client).offline.outbox;
+
+const mockHttpResponse = (resp, delay = 0) => {
+    (createHttpLink as jest.Mock).mockImplementationOnce(() => ({
+        request: () => new Observable(observer => {
+            const timer = setTimeout(() => {
+                observer.next({ ...resp });
+                observer.complete();
+            }, delay);
+
+            // On unsubscription, cancel the timer
+            return () => clearTimeout(timer);
+        })
     }));
 };
 
@@ -38,10 +55,12 @@ const getClient = (options?: Partial<AWSAppSyncClientOptions>) => {
         disableOffline: false,
     };
 
-    return new AWSAppSyncClient({
+    const client = new AWSAppSyncClient({
         ...defaultOptions,
         ...options
     });
+
+    return client;
 };
 
 const backendError = {
@@ -153,7 +172,7 @@ describe("Offline disabled", () => {
 
         try {
             await resultPromise;
-            
+
             fail("Error wasn't thrown");
         } catch (error) {
             expect(error).toMatchObject(graphqlError);
@@ -209,6 +228,13 @@ describe("Offline enabled", () => {
         expect(client.cache.extract(true)).toMatchObject({
             [`Todo:${localId}`]: optimisticResponse.addTodo
         });
+
+        // // Give it some time
+        // await new Promise(r => setTimeout(r, 200));
+        // // asert queue
+        // const { offline: { outbox } } = ((client as any)._store as Store<any>).getState();
+        // expect(((client as any)._store as Store<any>).getState()).not.toBeTruthy();
+        // expect((outbox as any[]).length).toBe(1);
 
         const result = await resultPromise;
 
@@ -328,10 +354,128 @@ describe("Offline enabled", () => {
         }
 
         // The optimistic response is no longer present in the cache
-        // expect(client.cache.extract(true)).toEqual({});
-        // expect(client.cache.extract(false)).toEqual({});
-
-        // Give it some time
-        await new Promise(r => setTimeout(r, 100));
+        expect(client.cache.extract(true)).not.toMatchObject({
+            [`Todo:${localId}`]: optimisticResponse.addTodo
+        });
     });
+
+    test.only("it updates ids of dependent mutations", async () => {
+        const localId = uuid();
+        const serverId = uuid();
+        const localIdChild = uuid();
+        const serverIdChild = uuid();
+
+        const optimisticResponseParent = {
+            addParent: {
+                __typename: 'Parent',
+                id: localId,
+                name: 'Parent'
+            }
+        };
+        const serverResponseParent = {
+            addParent: {
+                __typename: 'Parent',
+                id: serverId,
+                name: 'Parent'
+            }
+        };
+
+        const optimisticResponseChild = {
+            addChild: {
+                __typename: 'Child',
+                id: localIdChild,
+                name: 'Child'
+            }
+        };
+        const serverResponseChild = {
+            addChild: {
+                __typename: 'Child',
+                id: serverIdChild,
+                name: 'Child'
+            }
+        };
+
+        mockHttpResponse({ data: serverResponseParent });
+        mockHttpResponse({ data: serverResponseChild });
+
+        const client = getClient({ disableOffline: false });
+        await client.hydrated();
+
+        setNetworkOnlineStatus(false);
+        await new Promise(r => setTimeout(r, 100));
+
+        const parent = await client.mutate({
+            mutation: gql`mutation($name: String!) {
+                addParent(
+                    name: $name
+                ) {
+                    id,
+                    name
+                }
+            }`,
+            variables: {
+                name: 'Parent'
+            },
+            optimisticResponse: optimisticResponseParent,
+        });
+        expect(parent.data).toMatchObject(optimisticResponseParent);
+
+        const child = await client.mutate({
+            mutation: gql`mutation($parentId: ID, $name: String!) {
+                addChild(
+                    parentId: $parentId
+                    name: $name
+                ) {
+                    id,
+                    name
+                }
+            }`,
+            variables: {
+                parentId: localId,
+                name: 'Child'
+            },
+            optimisticResponse: optimisticResponseChild
+        });
+        expect(child.data).toMatchObject(optimisticResponseChild);
+
+        // The optimistic response is present in the cache
+        expect(client.cache.extract(false)).toMatchObject({
+            [`Parent:${localId}`]: optimisticResponseParent.addParent,
+            [`Child:${localIdChild}`]: optimisticResponseChild.addChild
+        });
+
+        // wait fo rthe to show in outbox
+        await new Promise(r => setTimeout(r, 100));
+
+        // asert queue
+        expect(getOutbox(client).length).toBe(2);
+
+        setNetworkOnlineStatus(true);
+        await new Promise(r => setTimeout(r, 100));
+
+        // Wait for queue to drain?
+        await new Promise(r => setTimeout(r, 100));
+
+        // asert queue
+        expect(getOutbox(client).length).toBe(0);
+
+        // The optimistic response is present in the cache
+        // expect(client.cache.extract(false)).not.toMatchObject({
+        //     [`Parent:${localId}`]: optimisticResponseParent.addParent,
+        //     [`Child:${localIdChild}`]: optimisticResponseChild.addChild
+        // });
+
+        // const result = await resultPromise;
+
+        // // Give it some time
+        // await new Promise(r => setTimeout(r, 100));
+
+        // expect(result).toMatchObject({ data: { ...serverResponseParent } });
+
+        // The server response is present in the cache
+        // expect(client.cache.extract(false)).toMatchObject({
+        //     [`Parent:${serverId}`]: serverResponseParent.addParent,
+        //     [`Child:${serverIdChild}`]: serverResponseChild.addChild,
+        // });
+    }, 6000);
 });

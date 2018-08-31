@@ -23,7 +23,6 @@ import AWSAppSyncClient from "..";
 import { ApolloCache } from "apollo-cache";
 import { MutationUpdaterFn, MutationQueryReducersMap } from "apollo-client";
 import { RefetchQueryDescription } from "apollo-client/core/watchQueryOptions";
-import { offline } from "@redux-offline/redux-offline";
 
 const actions = {
     SAVE_SNAPSHOT: 'SAVE_SNAPSHOT',
@@ -68,20 +67,12 @@ export class OfflineLink extends ApolloLink {
                         boundSaveSnapshot(this.store, cache);
                     }
 
-                    const data = enqueueMutation(operation, this.store);
-
-                    observer.next({ data });
-                    observer.complete();
+                    const data = enqueueMutation(operation, this.store, observer);
 
                     if (!online) {
-                        const {
-                            AASContext: {
-                                promise: { resolve },
-                            }
-                        } = operation.getContext();
-
-                        debugger;
-                        resolve({ data });
+                        // TODO: Flag response as "non real"
+                        observer.next({ data });
+                        observer.complete();
                     }
 
                     return () => null;
@@ -128,13 +119,10 @@ type EnqueuedMutationEffect<T> = {
     update: MutationUpdaterFn<T>,
     updateQueries: MutationQueryReducersMap<T>,
     refetchQueries: ((result: ExecutionResult) => RefetchQueryDescription) | RefetchQueryDescription,
-    promise: {
-        resolve: (val: Record<string, T>) => void,
-        reject: (val: Record<string, T>) => void,
-    },
+    observer: Observer<T>,
 };
 
-const enqueueMutation = (operation: Operation, theStore: Store<OfflineCache>): object => {
+const enqueueMutation = <T>(operation: Operation, theStore: Store<OfflineCache>, observer: Observer<T>): object => {
     const { query: mutation, variables } = operation;
     const {
         AASContext: {
@@ -142,32 +130,31 @@ const enqueueMutation = (operation: Operation, theStore: Store<OfflineCache>): o
             update,
             updateQueries,
             refetchQueries,
-            promise,
         }
     } = operation.getContext();
 
     const optimisticResponse = typeof origOptimistic === 'function' ? origOptimistic(variables) : origOptimistic;
 
-    setImmediate(() => {
-        theStore.dispatch({
-            type: actions.ENQUEUE,
-            payload: { optimisticResponse },
-            meta: {
-                offline: {
-                    effect: {
-                        optimisticResponse,
-                        operation,
-                        update,
-                        updateQueries,
-                        refetchQueries,
-                        promise,
-                    } as EnqueuedMutationEffect<any>,
-                    commit: { type: actions.COMMIT },
-                    rollback: { type: actions.ROLLBACK },
-                }
+    // setTimeout(() => {
+    theStore.dispatch({
+        type: actions.ENQUEUE,
+        payload: { optimisticResponse },
+        meta: {
+            offline: {
+                effect: {
+                    optimisticResponse,
+                    operation,
+                    update,
+                    updateQueries,
+                    refetchQueries,
+                    observer,
+                } as EnqueuedMutationEffect<any>,
+                commit: { type: actions.COMMIT },
+                rollback: { type: actions.ROLLBACK },
             }
-        });
+        }
     });
+    // }, 0);
 
     let result;
 
@@ -183,7 +170,6 @@ const enqueueMutation = (operation: Operation, theStore: Store<OfflineCache>): o
         }, {});
     }
 
-    console.log('Mutation enqueued', { result });
     return result;
 }
 
@@ -197,90 +183,62 @@ export const offlineEffect = async <TCache>(
     effect: EnqueuedMutationEffect<any>,
     action: OfflineAction
 ): Promise<FetchResult<Record<string, any>, Record<string, any>>> => {
-    const { cache }: { cache: CanBeSilenced<TCache> } = client;
     const doIt = true;
+    const { cache }: { cache: CanBeSilenced<TCache> } = client;
     const {
         optimisticResponse: origOptimistic,
         operation: { variables: origVars, query: mutation },
         update,
         updateQueries,
         refetchQueries,
-        promise: { resolve = null } = {}
+        observer,
     } = effect;
 
     await client.hydrated();
 
-    debugger;
-
     const { [METADATA_KEY]: { idsMap } } = store.getState();
+    debugger;
     const variables = replaceUsingMap({ ...origVars }, idsMap);
     const optimisticResponse = replaceUsingMap({ ...origOptimistic }, idsMap);
 
-    // disable broadcast queries
-    if (client && client.queryManager) {
-        const { [METADATA_KEY]: { snapshot: { cache: cacheSnapshot } } } = store.getState();
+    return new Promise((resolve, reject) => {
+        const buildOperationForLink: Function = Reflect.get(client.queryManager, 'buildOperationForLink');
+        const extraContext = {
+            AASContext: {
+                doIt
+            },
+            optimisticResponse
+        }; // TODO: Populate this
+        const operation = buildOperationForLink.call(client.queryManager, mutation, variables, extraContext);
 
-        client.queryManager.broadcastQueries = () => { };
+        execute(client.link, operation).subscribe({
+            next: data => {
+                debugger;
+                boundSaveServerId(store, optimisticResponse, data.data);
+                // TODO: Update cache
 
-        const silenceBroadcast = cache.silenceBroadcast;
-        cache.silenceBroadcast = true;
+                resolve({ data });
 
-        console.log('Restoring snapshot', { cacheSnapshot });
-        cache.restore({ ...(cacheSnapshot as any) });
+                if (observer.next) {
+                    observer.next(data);
+                    observer.complete();
+                } else {
+                    // throw new Error('Manually interact with cache');
+                }
+            },
+            error: err => {
+                // TODO: Undo cache updates?
 
-        cache.silenceBroadcast = silenceBroadcast;
-    }
+                reject(err);
 
-    const context = {
-        AASContext: {
-            doIt
-        }
-    };
-
-    debugger;
-    const result = await client.queryManager.mutate({
-        mutation,
-        variables,
-        context,
-        update,
-        refetchQueries,
-        updateQueries,
-    });
-    debugger;
-
-    const {
-        offline: { outbox: [, ...enquededMutations] },
-    } = store.getState();
-
-    // persist canonical snapshot
-    boundSaveSnapshot(store, cache);
-
-    // Save map of client ids with server ids
-    const { data: operationData } = result;
-    boundSaveServerId(store, optimisticResponse, operationData);
-
-    enquededMutations.forEach(({ meta: { offline: { effect } } }) => {
-        const { update, optimisticResponse: origOptimisticResponse } = effect as any;
-
-        if (typeof update !== 'function') {
-            return;
-        }
-
-        const optimisticResponse = replaceUsingMap({ ...origOptimisticResponse }, idsMap);
-
-        tryFunctionOrLogError(() => {
-            update(cache, { data: optimisticResponse });
+                if (observer.error) {
+                    observer.error(err);
+                } else {
+                    throw new Error('Manually interact with cache');
+                }
+            }
         });
     });
-
-    client.queryManager.broadcastQueries = client.origBroadcastQueries;
-    client.queryManager.broadcastQueries();
-
-    if (resolve) {
-        resolve(result);
-    }
-
-    return result;
 }
 
 export const reducer = dataIdFromObject => ({
@@ -340,8 +298,6 @@ const cacheSnapshotReducer = (state = {}, action) => {
         case actions.SAVE_SNAPSHOT:
             const { cache } = payload;
             const cacheContents = { ...cache.extract(false) };
-
-            console.log('Saving snapshot', cacheContents);
 
             return cacheContents;
         default:
@@ -406,14 +362,12 @@ export const discard = (fn: ConflictResolver = () => 'DISCARD') => (error, actio
 
     if (discardResult) {
         console.log(action);
-        debugger;
         const { } = action;
     }
 
     return discardResult;
 }
 const _discard = (fn: ConflictResolver = () => 'DISCARD', error, action, retries) => {
-    debugger;
     const { graphQLErrors = [] }: { graphQLErrors: AWSAppsyncGraphQLError[] } = error;
     const conditionalCheck = graphQLErrors.find(err => err.errorType === 'DynamoDB:ConditionalCheckFailedException');
 
