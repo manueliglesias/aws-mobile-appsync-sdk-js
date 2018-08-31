@@ -11,6 +11,5 @@ module.exports = {
         "json",
         "node"
     ],
-    testEnvironment: "jsdom",
-    testURL: "http://localhost/"
+    testEnvironment: "node"
 };

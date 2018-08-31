@@ -8,7 +8,7 @@
  */
 import { readQueryFromStore, defaultNormalizedCacheFactory, NormalizedCacheObject } from "apollo-cache-inmemory";
 import { ApolloLink, Observable, Operation, execute, GraphQLRequest, NextLink, FetchResult } from "apollo-link";
-import { getOperationDefinition, getOperationName, getMutationDefinition, resultKeyNameFromField, tryFunctionOrLogError } from "apollo-utilities";
+import { getOperationDefinition, getOperationName, getMutationDefinition, resultKeyNameFromField, tryFunctionOrLogError, getFragmentQueryDocument } from "apollo-utilities";
 import { PERSIST_REHYDRATE } from "@redux-offline/redux-offline/lib/constants";
 import { OfflineAction } from "@redux-offline/redux-offline/lib/types";
 import { DocumentNode, FieldNode, ExecutionResult } from "graphql";
@@ -135,26 +135,26 @@ const enqueueMutation = <T>(operation: Operation, theStore: Store<OfflineCache>,
 
     const optimisticResponse = typeof origOptimistic === 'function' ? origOptimistic(variables) : origOptimistic;
 
-    // setTimeout(() => {
-    theStore.dispatch({
-        type: actions.ENQUEUE,
-        payload: { optimisticResponse },
-        meta: {
-            offline: {
-                effect: {
-                    optimisticResponse,
-                    operation,
-                    update,
-                    updateQueries,
-                    refetchQueries,
-                    observer,
-                } as EnqueuedMutationEffect<any>,
-                commit: { type: actions.COMMIT },
-                rollback: { type: actions.ROLLBACK },
+    setImmediate(() => {
+        theStore.dispatch({
+            type: actions.ENQUEUE,
+            payload: { optimisticResponse },
+            meta: {
+                offline: {
+                    effect: {
+                        optimisticResponse,
+                        operation,
+                        update,
+                        updateQueries,
+                        refetchQueries,
+                        observer,
+                    } as EnqueuedMutationEffect<any>,
+                    commit: { type: actions.COMMIT },
+                    rollback: { type: actions.ROLLBACK },
+                }
             }
-        }
+        });
     });
-    // }, 0);
 
     let result;
 
@@ -177,7 +177,7 @@ interface CanBeSilenced<TCache> extends ApolloCache<TCache> {
     silenceBroadcast?: boolean
 };
 
-export const offlineEffect = async <TCache>(
+export const offlineEffect = async <TCache extends NormalizedCacheObject>(
     store: Store<OfflineCache>,
     client: AWSAppSyncClient<TCache>,
     effect: EnqueuedMutationEffect<any>,
@@ -197,7 +197,6 @@ export const offlineEffect = async <TCache>(
     await client.hydrated();
 
     const { [METADATA_KEY]: { idsMap } } = store.getState();
-    debugger;
     const variables = replaceUsingMap({ ...origVars }, idsMap);
     const optimisticResponse = replaceUsingMap({ ...origOptimistic }, idsMap);
 
@@ -213,9 +212,51 @@ export const offlineEffect = async <TCache>(
 
         execute(client.link, operation).subscribe({
             next: data => {
-                debugger;
                 boundSaveServerId(store, optimisticResponse, data.data);
-                // TODO: Update cache
+
+                const {
+                    [METADATA_KEY]: { idsMap, snapshot: { cache: cacheSnapshot } },
+                    offline: { outbox, outbox: [, ...enquededMutations] }
+                } = store.getState();
+
+                // Restore from cache snapshot
+                client.cache.restore(cacheSnapshot as TCache);
+
+                // Writing this mutation creates an entry for the result
+                client.cache.write({
+                    result: data.data,
+                    dataId: 'ROOT_MUTATION',
+                    query: mutation,
+                    variables: variables,
+                });
+
+                // Apply update function with the server response
+                // TODO: updateQueries, refetchQueries?
+                if (update && typeof update === 'function') {
+                    tryFunctionOrLogError(() => {
+                        update(client.cache, data);
+                    });
+
+                    // Save a new snapshot
+                    boundSaveSnapshot(store, client.cache);
+                }
+
+                // Apply enqueued update functions to new cache
+                enquededMutations.forEach(({ meta: { offline: { effect } } }) => {
+                    const { update, optimisticResponse: origOptimisticResponse } = effect as any;
+
+                    if (typeof update !== 'function') {
+                        return;
+                    }
+
+                    const optimisticResponse = replaceUsingMap({ ...origOptimisticResponse }, idsMap);
+
+                    tryFunctionOrLogError(() => {
+                        update(client.cache, { data: optimisticResponse });
+                    });
+                });
+
+                client.queryManager.broadcastQueries();
 
                 resolve({ data });
 

@@ -5,6 +5,7 @@ import { createHttpLink } from "apollo-link-http";
 import { AWSAppSyncClientOptions, AWSAppSyncClient, AUTH_TYPE } from "../src/client";
 import { Store } from "redux";
 import { OfflineCache } from "../src/cache/offline-cache";
+import { NormalizedCacheObject } from "apollo-cache-inmemory";
 
 jest.mock('apollo-link-http-common', () => ({
     checkFetcher: () => { },
@@ -24,15 +25,20 @@ jest.mock("@redux-offline/redux-offline/lib/defaults/detectNetwork", () => (call
     callback({ online: true });
 });
 
-const getStoreState = <T>(client: AWSAppSyncClient<T>) => ((client as any)._store as Store<OfflineCache>).getState();
+const getStoreState = <T extends NormalizedCacheObject>(client: AWSAppSyncClient<T>) => ((client as any)._store as Store<OfflineCache>).getState();
 
-const isNetworkOnline = <T>(client: AWSAppSyncClient<T>) => getStoreState(client).offline.online;
+const isNetworkOnline = <T extends NormalizedCacheObject>(client: AWSAppSyncClient<T>) => getStoreState(client).offline.online;
 
-const getOutbox = <T>(client: AWSAppSyncClient<T>) => getStoreState(client).offline.outbox;
+const getOutbox = <T extends NormalizedCacheObject>(client: AWSAppSyncClient<T>) => getStoreState(client).offline.outbox;
 
-const mockHttpResponse = (resp, delay = 0) => {
-    (createHttpLink as jest.Mock).mockImplementationOnce(() => ({
-        request: () => new Observable(observer => {
+const mockHttpResponse = (responses: any[] | any, delay = 0) => {
+
+    const mock = (createHttpLink as jest.Mock);
+
+    const requestMock = jest.fn();
+
+    [].concat(responses).forEach((resp) => {
+        requestMock.mockImplementationOnce(() => new Observable(observer => {
             const timer = setTimeout(() => {
                 observer.next({ ...resp });
                 observer.complete();
@@ -40,9 +46,64 @@ const mockHttpResponse = (resp, delay = 0) => {
 
             // On unsubscription, cancel the timer
             return () => clearTimeout(timer);
-        })
+        }));
+    });
+
+    mock.mockImplementation(() => ({
+        request: requestMock
     }));
 };
+
+class MemoryStorage {
+    private storage;
+    private logger;
+    constructor({ logger = null, initialState = {} } = {}) {
+        this.storage = Object.assign({}, initialState)
+        this.logger = logger
+    }
+
+    log(...args) {
+        if (this.logger && typeof this.logger === 'function') {
+            this.logger(...args)
+        }
+    }
+    setItem(key, value, callback) {
+        return new Promise((resolve, reject) => {
+            this.storage[key] = value
+            this.log('setItem called with', key, value)
+            if (callback) callback(null, value)
+            resolve(value)
+        })
+    }
+
+    getItem(key, callback) {
+        return new Promise((resolve, reject) => {
+            this.log('getItem called with', key)
+            const value = this.storage[key]
+            if (callback) callback(null, value)
+            resolve(value)
+        })
+    }
+
+    removeItem(key, callback) {
+        return new Promise((resolve, reject) => {
+            this.log('removeItem called with', key)
+            const value = this.storage[key]
+            delete this.storage[key]
+            if (callback) callback(null, value)
+            resolve(value)
+        })
+    }
+
+    getAllKeys(callback) {
+        return new Promise((resolve, reject) => {
+            this.log('getAllKeys called')
+            const keys = Object.keys(this.storage)
+            if (callback) callback(null, keys)
+            resolve(keys)
+        })
+    }
+}
 
 const getClient = (options?: Partial<AWSAppSyncClientOptions>) => {
     const defaultOptions = {
@@ -53,6 +114,9 @@ const getClient = (options?: Partial<AWSAppSyncClientOptions>) => {
             apiKey: 'some key'
         },
         disableOffline: false,
+        offlineConfig: {
+            storage: new MemoryStorage(),
+        },
     };
 
     const client = new AWSAppSyncClient({
@@ -76,6 +140,8 @@ const graphqlError = {
     networkError: null,
     message: `GraphQL error: ${backendError.message}`
 };
+
+const WAIT = 200;
 
 describe("Offline disabled", () => {
 
@@ -230,7 +296,7 @@ describe("Offline enabled", () => {
         });
 
         // // Give it some time
-        // await new Promise(r => setTimeout(r, 200));
+        // await new Promise(r => setTimeout(r, WAIT));
         // // asert queue
         // const { offline: { outbox } } = ((client as any)._store as Store<any>).getState();
         // expect(((client as any)._store as Store<any>).getState()).not.toBeTruthy();
@@ -239,7 +305,7 @@ describe("Offline enabled", () => {
         const result = await resultPromise;
 
         // Give it some time
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, WAIT));
 
         expect(result).toMatchObject({ data: { ...serverResponse } });
 
@@ -297,7 +363,7 @@ describe("Offline enabled", () => {
         const result = await resultPromise;
 
         // Give it some time
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, WAIT));
 
         expect(result).toMatchObject({ data: { ...optimisticResponse } });
 
@@ -359,7 +425,7 @@ describe("Offline enabled", () => {
         });
     });
 
-    test.only("it updates ids of dependent mutations", async () => {
+    test("it updates ids of dependent mutations", async () => {
         const localId = uuid();
         const serverId = uuid();
         const localIdChild = uuid();
@@ -384,6 +450,7 @@ describe("Offline enabled", () => {
             addChild: {
                 __typename: 'Child',
                 id: localIdChild,
+                parentId: localId,
                 name: 'Child'
             }
         };
@@ -391,18 +458,173 @@ describe("Offline enabled", () => {
             addChild: {
                 __typename: 'Child',
                 id: serverIdChild,
+                parentId: serverId,
                 name: 'Child'
             }
         };
 
-        mockHttpResponse({ data: serverResponseParent });
-        mockHttpResponse({ data: serverResponseChild });
+        mockHttpResponse([
+            { data: serverResponseParent },
+            { data: serverResponseChild },
+        ]);
 
         const client = getClient({ disableOffline: false });
         await client.hydrated();
 
+        expect(getOutbox(client).length).toBe(0);
+
         setNetworkOnlineStatus(false);
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, WAIT));
+
+        const parent = await client.mutate({
+            mutation: gql`mutation($name: String!) {
+                addParent(
+                    name: $name
+                ) {
+                    id,
+                    name
+                }
+            }`,
+            variables: {
+                name: 'Parent'
+            },
+            optimisticResponse: optimisticResponseParent,
+            update: (proxy, { data }) => {
+                proxy.writeQuery({
+                    query: gql`query Bla($id: ID) {
+                        getParent(id: $id) {
+                            id
+                            name
+                        }
+                    }`,
+                    variables: {
+                        id: data.addParent.id
+                    },
+                    data: {
+                        getParent: { ...data.addParent }
+                    }
+                })
+            }
+        });
+        expect(parent.data).toMatchObject(optimisticResponseParent);
+
+        const child = await client.mutate({
+            mutation: gql`mutation($parentId: ID, $name: String!) {
+                addChild(
+                    parentId: $parentId
+                    name: $name
+                ) {
+                    id,
+                    parentId,
+                    name
+                }
+            }`,
+            variables: {
+                parentId: localId,
+                name: 'Child'
+            },
+            optimisticResponse: optimisticResponseChild,
+            update: (proxy, { data }) => {
+                proxy.writeQuery({
+                    query: gql`query Ble($id: ID!) {
+                        getChild(id: $id) {
+                            id
+                            parentId
+                            name
+                        }
+                    }`,
+                    variables: {
+                        id: data.addChild.id
+                    },
+                    data: {
+                        getChild: { ...data.addChild }
+                    }
+                })
+            }
+        });
+        expect(child.data).toMatchObject(optimisticResponseChild);
+
+        // The optimistic response is present in the cache
+        expect(client.cache.extract(false)).toMatchObject({
+            [`Parent:${localId}`]: optimisticResponseParent.addParent,
+            [`Child:${localIdChild}`]: optimisticResponseChild.addChild
+        });
+
+        // wait for them to show in outbox
+        await new Promise(r => setTimeout(r, WAIT));
+
+        // asert queue
+        expect(getOutbox(client).length).toBe(2);
+
+        setNetworkOnlineStatus(true);
+        await new Promise(r => setTimeout(r, WAIT));
+
+        // Wait for queue to drain?
+        await new Promise(r => setTimeout(r, WAIT));
+
+        // asert queue
+        expect(getOutbox(client).length).toBe(0);
+
+        // Give it some time
+        await new Promise(r => setTimeout(r, WAIT));
+
+        // The server response is present in the cache
+        expect(client.cache.extract(false)).toMatchObject({
+            [`Parent:${serverId}`]: serverResponseParent.addParent,
+            [`Child:${serverIdChild}`]: serverResponseChild.addChild,
+        });
+    });
+
+    test("it updates ids of dependent mutations (no update functions)", async () => {
+        const localId = uuid();
+        const serverId = uuid();
+        const localIdChild = uuid();
+        const serverIdChild = uuid();
+
+        const optimisticResponseParent = {
+            addParent: {
+                __typename: 'Parent',
+                id: localId,
+                name: 'Parent'
+            }
+        };
+        const serverResponseParent = {
+            addParent: {
+                __typename: 'Parent',
+                id: serverId,
+                name: 'Parent'
+            }
+        };
+
+        const optimisticResponseChild = {
+            addChild: {
+                __typename: 'Child',
+                id: localIdChild,
+                parentId: localId,
+                name: 'Child'
+            }
+        };
+        const serverResponseChild = {
+            addChild: {
+                __typename: 'Child',
+                id: serverIdChild,
+                parentId: serverId,
+                name: 'Child'
+            }
+        };
+
+        mockHttpResponse([
+            { data: serverResponseParent },
+            { data: serverResponseChild },
+        ]);
+
+        const client = getClient({ disableOffline: false });
+        await client.hydrated();
+
+        expect(getOutbox(client).length).toBe(0);
+
+        setNetworkOnlineStatus(false);
+        await new Promise(r => setTimeout(r, WAIT));
 
         const parent = await client.mutate({
             mutation: gql`mutation($name: String!) {
@@ -427,6 +649,7 @@ describe("Offline enabled", () => {
                     name: $name
                 ) {
                     id,
+                    parentId,
                     name
                 }
             }`,
@@ -434,7 +657,7 @@ describe("Offline enabled", () => {
                 parentId: localId,
                 name: 'Child'
             },
-            optimisticResponse: optimisticResponseChild
+            optimisticResponse: optimisticResponseChild,
         });
         expect(child.data).toMatchObject(optimisticResponseChild);
 
@@ -444,38 +667,30 @@ describe("Offline enabled", () => {
             [`Child:${localIdChild}`]: optimisticResponseChild.addChild
         });
 
-        // wait fo rthe to show in outbox
-        await new Promise(r => setTimeout(r, 100));
+        // wait for them to show in outbox
+        await new Promise(r => setTimeout(r, WAIT));
 
         // asert queue
         expect(getOutbox(client).length).toBe(2);
 
         setNetworkOnlineStatus(true);
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, WAIT));
 
         // Wait for queue to drain?
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, WAIT));
 
         // asert queue
         expect(getOutbox(client).length).toBe(0);
 
-        // The optimistic response is present in the cache
-        // expect(client.cache.extract(false)).not.toMatchObject({
-        //     [`Parent:${localId}`]: optimisticResponseParent.addParent,
-        //     [`Child:${localIdChild}`]: optimisticResponseChild.addChild
-        // });
-
-        // const result = await resultPromise;
-
-        // // Give it some time
-        // await new Promise(r => setTimeout(r, 100));
-
-        // expect(result).toMatchObject({ data: { ...serverResponseParent } });
+        // Give it some time
+        await new Promise(r => setTimeout(r, WAIT));
 
         // The server response is present in the cache
-        // expect(client.cache.extract(false)).toMatchObject({
-        //     [`Parent:${serverId}`]: serverResponseParent.addParent,
-        //     [`Child:${serverIdChild}`]: serverResponseChild.addChild,
-        // });
-    }, 6000);
+        expect(client.cache.extract(false)).toMatchObject({
+            [`Parent:${serverId}`]: serverResponseParent.addParent,
+            [`Child:${serverIdChild}`]: serverResponseChild.addChild,
+        });
+    });
+
+    // missing update function
 });

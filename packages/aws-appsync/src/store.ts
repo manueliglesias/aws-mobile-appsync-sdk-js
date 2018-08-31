@@ -7,12 +7,14 @@ import thunk from 'redux-thunk';
 import { AWSAppSyncClient } from './client';
 import { reducer as cacheReducer, NORMALIZED_CACHE_KEY, METADATA_KEY } from './cache/index';
 import { reducer as offlineMetadataReducer, offlineEffect, discard, ConflictResolver } from './link/offline-link';
+import { NormalizedCacheObject } from 'apollo-cache-inmemory';
 
-const newStore = <TCacheShape>(
+const newStore = <TCacheShape extends NormalizedCacheObject>(
     clientGetter: () => AWSAppSyncClient<TCacheShape> = () => null,
     persistCallback = () => null,
     conflictResolver: ConflictResolver,
-    dataIdFromObject: (obj) => string | null
+    dataIdFromObject: (obj) => string | null,
+    storage?: any,
 ): Store<any> => {
     const store = createStore(
         combineReducers({
@@ -34,7 +36,12 @@ const newStore = <TCacheShape>(
                 ...offlineConfig,
                 persistCallback,
                 persistOptions: {
-                    whitelist: [NORMALIZED_CACHE_KEY, METADATA_KEY, 'offline']
+                    storage,
+                    whitelist: [
+                        NORMALIZED_CACHE_KEY,
+                        METADATA_KEY,
+                        'offline',
+                    ]
                 },
                 effect: (effect, action) => offlineEffect(store, clientGetter(), effect, action),
                 discard: discard(conflictResolver),
