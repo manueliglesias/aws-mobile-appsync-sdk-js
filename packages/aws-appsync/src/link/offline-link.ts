@@ -222,37 +222,37 @@ export const offlineEffect = async <TCache extends NormalizedCacheObject>(
                 // Restore from cache snapshot
                 client.cache.restore(cacheSnapshot as TCache);
 
-                // Writing this mutation creates an entry for the result
-                client.cache.write({
-                    result: data.data,
-                    dataId: 'ROOT_MUTATION',
-                    query: mutation,
-                    variables: variables,
+                const dataStore = client.queryManager.dataStore;
+
+                dataStore.markMutationResult({
+                    mutationId: null,
+                    result: data,
+                    document: mutation,
+                    variables,
+                    updateQueries: {}, // TODO: populate this?
+                    update
                 });
 
-                // Apply update function with the server response
-                // TODO: updateQueries, refetchQueries?
-                if (update && typeof update === 'function') {
-                    tryFunctionOrLogError(() => {
-                        update(client.cache, data);
-                    });
-
-                    // Save a new snapshot
-                    boundSaveSnapshot(store, client.cache);
-                }
+                boundSaveSnapshot(store, client.cache);
 
                 // Apply enqueued update functions to new cache
                 enquededMutations.forEach(({ meta: { offline: { effect } } }) => {
-                    const { update, optimisticResponse: origOptimisticResponse } = effect as any;
+                    const { operation: { variables, query: document }, update, optimisticResponse: origOptimisticResponse } = effect as any;
 
                     if (typeof update !== 'function') {
                         return;
                     }
 
                     const optimisticResponse = replaceUsingMap({ ...origOptimisticResponse }, idsMap);
+                    const result = { data: optimisticResponse };
 
-                    tryFunctionOrLogError(() => {
-                        update(client.cache, { data: optimisticResponse });
+                    dataStore.markMutationResult({
+                        mutationId: null,
+                        result,
+                        document,
+                        variables,
+                        updateQueries: {}, // TODO: populate this?
+                        update
                     });
                 });
 
