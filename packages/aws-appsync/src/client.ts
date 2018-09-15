@@ -245,7 +245,55 @@ class AWSAppSyncClient<TCacheShape extends NormalizedCacheObject> extends Apollo
             ...otherOptions,
         });
     }
+    subscribeWithSync<T, TVariables = OperationVariables>(options: SubscribeWithSyncOptions<T, TVariables>): Observable<T> {
+        return new Observable<T>(observer => {
+            const subscription = this.cosa(options, observer);
+
+            return () => {
+                subscription.unsubscribe();
+            }
+        });
+    }
+
+    private cosa<T, TVariables>(
+        options: SubscribeWithSyncOptions<T, TVariables>,
+        observer: ZenObservable.SubscriptionObserver<T>): ZenObservable.Subscription {
+        return new Observable(observer => {
+            let timestamp = new Date().getTime();
+
+            const subscription = this.subscribe({
+                query: options.subscriptionQuery.query,
+                variables: options.subscriptionQuery.variables,
+            }).subscribe({
+                next: data => {
+                    // store in buffer
+                    // update timestamp
+                    // update cache
+                },
+                error: error => {
+                    // re-connect
+                    // delta sync query
+                    // update timestamp
+                }
+            });
+
+            this.query({
+                fetchPolicy: 'cache-first',
+                query: options.initialQuery.query,
+                variables: options.initialQuery.variables,
+            });
+
+            return () => { };
+        }).subscribe({});
+    }
 }
+
+export declare type SubscribeWithSyncOptions<T, TVariables = OperationVariables> = {
+    initialQuery: { query: DocumentNode, variables: TVariables },
+    subscriptionQuery: { query: DocumentNode, variables: TVariables },
+    deltaQuery: { query: DocumentNode, variables: TVariables },
+    timestamp?: number,
+};
 
 export default AWSAppSyncClient;
 export { AWSAppSyncClient };

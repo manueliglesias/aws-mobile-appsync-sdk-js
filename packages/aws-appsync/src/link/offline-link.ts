@@ -298,12 +298,13 @@ export const offlineEffect = async <TCache extends NormalizedCacheObject>(
                             variables: newVars,
                             ...data,
                             notified: !!observer.next,
-                        })
+                        });
                     });
                 }
             },
             error: err => {
                 // TODO: Undo cache updates?
+                console.error({ err });
 
                 reject(err);
             }
@@ -416,13 +417,17 @@ const idsMapReducer = (state = {}, action, dataIdFromObject) => {
     }
 };
 
-export const discard = (callback: OfflineCallback) => (error, action, retries) => {
+export const discard = (callback: OfflineCallback) => (error, action: OfflineAction, retries) => {
     const discardResult = _discard(error, action, retries);
 
     if (discardResult) {
         // Call global error callback or observer
         try {
             if (typeof callback === 'function') {
+                const { observer } = action.meta.offline.effect as any;
+
+                observer.error(error);
+
                 tryFunctionOrLogError(() => {
                     callback({ error }, null);
                 });

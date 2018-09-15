@@ -10,6 +10,7 @@ import { isOptimistic } from "../src/link/offline-link";
 import { GraphQLError } from "graphql";
 import { ApolloError } from "apollo-client";
 import { AWSAppsyncGraphQLError } from "../src/types";
+import { ServerError } from "apollo-link-http-common";
 
 jest.mock('apollo-link-http-common', () => ({
     checkFetcher: () => { },
@@ -35,6 +36,8 @@ const isNetworkOnline = <T extends NormalizedCacheObject>(client: AWSAppSyncClie
 
 const getOutbox = <T extends NormalizedCacheObject>(client: AWSAppSyncClient<T>) => getStoreState(client).offline.outbox;
 
+const RESPONSE_ERROR_KEY = typeof Symbol !== 'undefined' ? Symbol('error') : '@@error';
+
 const mockHttpResponse = (responses: any[] | any, delay = 0) => {
 
     const mock = (createHttpLink as jest.Mock);
@@ -44,8 +47,12 @@ const mockHttpResponse = (responses: any[] | any, delay = 0) => {
     [].concat(responses).forEach((resp) => {
         requestMock.mockImplementationOnce(() => new Observable(observer => {
             const timer = setTimeout(() => {
-                observer.next({ ...resp });
-                observer.complete();
+                if (resp[RESPONSE_ERROR_KEY]) {
+                    observer.error({ ...resp, permanent: true });
+                } else {
+                    observer.next({ ...resp });
+                    observer.complete();
+                }
             }, delay);
 
             // On unsubscription, cancel the timer
@@ -156,6 +163,22 @@ const createGraphQLError: (error: GraphQLError) => ApolloError = backendError =>
     graphQLErrors: [{ ...backendError }],
     networkError: null,
     errorMessage: `GraphQL error: ${backendError.message}`
+});
+
+const createServerError: (response: any, statusCode: number, result: any) => ServerError = (response, statusCode, result) => {
+    const error = new Error('algo') as ServerError;
+
+    error.response = response;
+    error.statusCode = statusCode;
+    error.result = result;
+
+    return error;
+};
+
+const createNetworkError: (error: ServerError) => ApolloError = backendError => new ApolloError({
+    graphQLErrors: [],
+    networkError: { ...backendError } as Error,
+    // errorMessage: `Network error: ${backendError}`
 });
 
 describe("Offline disabled", () => {
@@ -523,6 +546,71 @@ describe("Offline enabled", () => {
         }
 
         expect(conflictResolver).not.toBeCalled();
+
+        // The optimistic response is no longer present in the cache
+        expect(client.cache.extract(true)).not.toMatchObject({
+            [`Todo:${localId}`]: optimisticResponse.addTodo
+        });
+    });
+
+    test.skip("error handling (online) global callback", async () => {
+        const localId = uuid();
+
+        const optimisticResponse = {
+            addTodo: {
+                __typename: 'Todo',
+                id: localId,
+                name: 'MyTodo1'
+            }
+        };
+
+        const backendError = createServerError({}, 500, {});
+        const networkError = createNetworkError(backendError);
+
+        mockHttpResponse({
+            data: { addTodo: null },
+            errors: [backendError],
+            [RESPONSE_ERROR_KEY]: true,
+        });
+
+        const conflictResolver = jest.fn();
+        const callback = jest.fn();
+        const client = getClient({ disableOffline: false, conflictResolver, offlineConfig: { callback } });
+
+        const resultPromise = client.mutate({
+            mutation: gql`mutation($name: String!) {
+                addTodo(
+                    name: $name
+                ) {
+                    id,
+                    name
+                }
+            }`,
+            variables: {
+                name: 'MyTodo1'
+            },
+            optimisticResponse
+        });
+
+        // The optimistic response is present in the cache
+        expect(client.cache.extract(true)).toMatchObject({
+            [`Todo:${localId}`]: optimisticResponse.addTodo
+        });
+
+        try {
+            await resultPromise;
+
+            fail("Error wasn't thrown");
+        } catch (error) {
+            expect(error).toMatchObject(networkError);
+            // fail('ssdasdadads');
+        }
+
+        await new Promise(r => setTimeout(r, 2000));
+
+
+        expect(conflictResolver).not.toBeCalled();
+        expect(callback).not.toBeCalled();
 
         // The optimistic response is no longer present in the cache
         expect(client.cache.extract(true)).not.toMatchObject({
