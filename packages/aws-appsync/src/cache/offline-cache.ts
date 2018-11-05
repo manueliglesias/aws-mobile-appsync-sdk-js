@@ -10,6 +10,7 @@ import { Cache } from 'apollo-cache';
 import { InMemoryCache, ApolloReducerConfig, defaultDataIdFromObject, NormalizedCacheObject } from 'apollo-cache-inmemory';
 import { Store } from 'redux';
 import { DeltaSyncState, DELTASYNC_KEY } from '../deltaSync';
+import { DocumentNode } from 'graphql';
 
 // Offline schema keys: Do not change in a non-backwards-compatible way
 export const NORMALIZED_CACHE_KEY = 'appsync';
@@ -29,6 +30,7 @@ export type AppSyncMetadataState = {
         enqueuedMutations: number,
     },
     [DELTASYNC_KEY]: DeltaSyncState,
+    mutationsMap: { [key: string]: DocumentNode }
 }
 
 type AppState = {

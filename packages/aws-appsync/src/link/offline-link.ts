@@ -11,13 +11,13 @@ import { ApolloLink, Observable, Operation, execute, GraphQLRequest, NextLink, F
 import { getOperationDefinition, getMutationDefinition, resultKeyNameFromField, tryFunctionOrLogError } from "apollo-utilities";
 import { PERSIST_REHYDRATE } from "@redux-offline/redux-offline/lib/constants";
 import { OfflineAction } from "@redux-offline/redux-offline/lib/types";
-import { FieldNode, ExecutionResult } from "graphql";
+import { FieldNode, ExecutionResult, print } from "graphql";
 
 import { NORMALIZED_CACHE_KEY, METADATA_KEY } from "../cache";
 import { AWSAppsyncGraphQLError } from "../types";
-import { Store } from "redux";
+import { Store, AnyAction } from "redux";
 import { OfflineCache, AppSyncMetadataState } from "../cache/offline-cache";
-import { isUuid, getOperationFieldName } from "../utils";
+import { isUuid, getOperationFieldName, hash } from "../utils";
 import AWSAppSyncClient from "..";
 import { ApolloCache } from "apollo-cache";
 import { MutationUpdaterFn, MutationQueryReducersMap, ApolloError } from "apollo-client";
@@ -28,6 +28,7 @@ import { OfflineEffectConfig } from "../store";
 
 const actions = {
     SAVE_SNAPSHOT: 'SAVE_SNAPSHOT',
+    SAVE_MUTATION_HASH: 'SAVE_MUTATION_HASH',
     ENQUEUE: 'ENQUEUE_OFFLINE_MUTATION',
     COMMIT: 'COMMIT_OFFLINE_MUTATION',
     ROLLBACK: 'ROLLBACK_OFFLINE_MUTATION',
@@ -121,7 +122,8 @@ const processOfflineQuery = (operation: Operation, theStore: Store<OfflineCache>
 
 export type EnqueuedMutationEffect<T> = {
     optimisticResponse: object,
-    operation: GraphQLRequest,
+    operation: Partial<GraphQLRequest>,
+    mutationHash: string,
     update: MutationUpdaterFn<T>,
     updateQueries: MutationQueryReducersMap<T>,
     refetchQueries: ((result: ExecutionResult) => RefetchQueryDescription) | RefetchQueryDescription,
@@ -141,20 +143,35 @@ const enqueueMutation = <T>(operation: Operation, theStore: Store<OfflineCache>,
 
     const optimisticResponse = typeof origOptimistic === 'function' ? origOptimistic(variables) : origOptimistic;
 
+    const { query, ...opNoQuery } = operation;
+
+    const mutationHash = hash(JSON.stringify(print(query)));
+
+    const effect: EnqueuedMutationEffect<any> = {
+        optimisticResponse,
+        mutationHash,
+        operation: opNoQuery,
+        update,
+        updateQueries,
+        refetchQueries,
+        observer,
+    };
+
+    theStore.dispatch({
+        type: actions.SAVE_MUTATION_HASH,
+        payload: {
+            hash: mutationHash,
+            query,
+        },
+    });
+
     setImmediate(() => {
         theStore.dispatch({
             type: actions.ENQUEUE,
             payload: { optimisticResponse },
             meta: {
                 offline: {
-                    effect: {
-                        optimisticResponse,
-                        operation,
-                        update,
-                        updateQueries,
-                        refetchQueries,
-                        observer,
-                    } as EnqueuedMutationEffect<any>,
+                    effect,
                     commit: { type: actions.COMMIT },
                     rollback: { type: actions.ROLLBACK },
                 }
@@ -194,7 +211,8 @@ const effect = async <TCache extends NormalizedCacheObject>(
     const { cache }: { cache: CanBeSilenced<TCache> } = client;
     const {
         optimisticResponse: origOptimistic,
-        operation: { variables: origVars, query: mutation, context },
+        mutationHash,
+        operation: { variables: origVars, context, query: legacyMutation },
         update,
         updateQueries,
         refetchQueries,
@@ -202,6 +220,8 @@ const effect = async <TCache extends NormalizedCacheObject>(
     } = effect;
 
     await client.hydrated();
+
+    const mutation = legacyMutation || store.getState()[METADATA_KEY].mutationsMap[mutationHash];
 
     const { [METADATA_KEY]: { idsMap } } = store.getState();
     const variables = {
@@ -258,10 +278,13 @@ const effect = async <TCache extends NormalizedCacheObject>(
                     .filter(({ type }) => enqueuedActionsFilter.indexOf(type) > -1)
                     .forEach(({ meta: { offline: { effect } } }) => {
                         const {
-                            operation: { variables = {}, query: document = null } = {},
+                            operation: { variables = {}, query = null } = {},
                             update,
+                            mutationHash,
                             optimisticResponse: origOptimisticResponse,
                         } = effect as EnqueuedMutationEffect<any>;
+
+                        const document = query || store.getState()[METADATA_KEY].mutationsMap[mutationHash];
 
                         if (typeof update !== 'function') {
                             return;
@@ -342,11 +365,13 @@ const reducer = dataIdFromObject => (state: AppSyncMetadataState, action) => {
             const { idsMap: origIdsMap = {}, snapshot: origSnapshot = {}, ...restState } = state || {};
             const snapshot = snapshotReducer(origSnapshot, action);
             const idsMap = idsMapReducer(origIdsMap, { ...action, remainingMutations: snapshot.enqueuedMutations }, dataIdFromObject);
+            const mutationsMap = mutationsMapReducer(state && state.mutationsMap, { ...action, remainingMutations: snapshot.enqueuedMutations });
 
             return {
                 ...restState,
                 snapshot,
                 idsMap,
+                mutationsMap,
             };
     }
 };
@@ -433,7 +458,33 @@ const idsMapReducer = (state = {}, action, dataIdFromObject) => {
     }
 };
 
-const discard = (callback: OfflineCallback, error, action, retries) => {
+const mutationsMapReducer = (state = {}, action: AnyAction) => {
+    const { type } = action;
+
+    switch (type) {
+        case actions.SAVE_MUTATION_HASH:
+            const {
+                payload: {
+                    hash: opHash,
+                    query,
+                }
+            } = action;
+
+            return {
+                ...state,
+                [opHash]: query,
+            };
+        case actions.COMMIT:
+            const { remainingMutations } = action;
+
+            // Clear mutations hash map on last mutation
+            return remainingMutations ? state : {};
+    }
+
+    return state;
+};
+
+const discard = (callback: OfflineCallback) => (error, action, retries) => {
     const discardResult = _discard(error, action, retries);
 
     if (discardResult) {
