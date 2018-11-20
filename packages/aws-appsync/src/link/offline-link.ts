@@ -6,6 +6,7 @@
  * or in the "license" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, express or implied. See the License for the specific language governing permissions and limitations under the License.
  */
+import debug from 'debug';
 import { readQueryFromStore, defaultNormalizedCacheFactory, NormalizedCacheObject } from "apollo-cache-inmemory";
 import { ApolloLink, Observable, Operation, execute, GraphQLRequest, NextLink, FetchResult } from "apollo-link";
 import { getOperationDefinition, getMutationDefinition, resultKeyNameFromField, tryFunctionOrLogError } from "apollo-utilities";
@@ -25,6 +26,8 @@ import { RefetchQueryDescription } from "apollo-client/core/watchQueryOptions";
 import { OfflineCallback } from "../client";
 import { SKIP_RETRY_KEY } from "./retry-link";
 import { OfflineEffectConfig } from "../store";
+
+const logger = debug('aws-appsync:offline-link');
 
 const actions = {
     SAVE_SNAPSHOT: 'SAVE_SNAPSHOT',
@@ -121,7 +124,6 @@ const processOfflineQuery = (operation: Operation, theStore: Store<OfflineCache>
 }
 
 export type EnqueuedMutationEffect<T> = {
-    optimisticResponse: object,
     operation: Partial<GraphQLRequest>,
     mutationHash: string,
     update: MutationUpdaterFn<T>,
@@ -148,7 +150,6 @@ const enqueueMutation = <T>(operation: Operation, theStore: Store<OfflineCache>,
     const mutationHash = hash(JSON.stringify(print(query)));
 
     const effect: EnqueuedMutationEffect<any> = {
-        optimisticResponse,
         mutationHash,
         operation: opNoQuery,
         update,
@@ -196,10 +197,6 @@ const enqueueMutation = <T>(operation: Operation, theStore: Store<OfflineCache>,
     return result;
 }
 
-interface CanBeSilenced<TCache> extends ApolloCache<TCache> {
-    silenceBroadcast?: boolean
-};
-
 const effect = async <TCache extends NormalizedCacheObject>(
     store: Store<OfflineCache>,
     client: AWSAppSyncClient<TCache>,
@@ -208,9 +205,8 @@ const effect = async <TCache extends NormalizedCacheObject>(
     callback: OfflineCallback,
 ): Promise<FetchResult<Record<string, any>, Record<string, any>>> => {
     const doIt = true;
-    const { cache }: { cache: CanBeSilenced<TCache> } = client;
+    const { optimisticResponse: origOptimistic } = action.payload as any;
     const {
-        optimisticResponse: origOptimistic,
         mutationHash,
         operation: { variables: origVars, context, query: legacyMutation },
         update,
@@ -245,6 +241,7 @@ const effect = async <TCache extends NormalizedCacheObject>(
         };
         const operation = buildOperationForLink.call(client.queryManager, mutation, variables, extraContext);
 
+        logger('Executing link', operation);
         execute(client.link, operation).subscribe({
             next: data => {
                 boundSaveServerId(store, optimisticResponse, data.data);
@@ -276,22 +273,25 @@ const effect = async <TCache extends NormalizedCacheObject>(
                 ];
                 enquededMutations
                     .filter(({ type }) => enqueuedActionsFilter.indexOf(type) > -1)
-                    .forEach(({ meta: { offline: { effect } } }) => {
+                    .forEach(({ meta: { offline: { effect } }, payload }) => {
+                        const { optimisticResponse: origOptimisticResponse } = payload;
                         const {
                             operation: { variables = {}, query = null } = {},
                             update,
                             mutationHash,
-                            optimisticResponse: origOptimisticResponse,
                         } = effect as EnqueuedMutationEffect<any>;
 
                         const document = query || store.getState()[METADATA_KEY].mutationsMap[mutationHash];
 
                         if (typeof update !== 'function') {
+                            logger('No update function for mutation', { document, variables });
                             return;
                         }
 
                         const optimisticResponse = replaceUsingMap({ ...origOptimisticResponse }, idsMap);
                         const result = { data: optimisticResponse };
+
+                        logger('Running update function for mutation', { document, variables });
 
                         dataStore.markMutationResult({
                             mutationId: null,
@@ -345,7 +345,7 @@ const effect = async <TCache extends NormalizedCacheObject>(
                 }
             },
             error: err => {
-                // TODO: Undo cache updates?
+                logger('Error when executing link', err);
 
                 reject(err);
             }

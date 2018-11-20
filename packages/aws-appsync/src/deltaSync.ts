@@ -415,19 +415,22 @@ const effect = async <TCache extends NormalizedCacheObject>(
         const enqueuedActionsFilter = [mutationsConfig.enqueueAction];
         enquededMutations
             .filter(({ type }) => enqueuedActionsFilter.indexOf(type) > -1)
-            .forEach(({ meta: { offline: { effect } } }) => {
+            .forEach(({ meta: { offline: { effect } }, payload }) => {
+                const { optimisticResponse: origOptimisticResponse } = payload;
                 const {
                     operation: { variables = {}, query = null } = {},
                     update,
                     mutationHash,
-                    optimisticResponse: origOptimisticResponse,
                 } = effect as EnqueuedMutationEffect<any>;
 
+                const document = query || store.getState()[METADATA_KEY].mutationsMap[mutationHash];
+
                 if (typeof update !== 'function') {
+                    logger('No update function for mutation', { document, variables });
                     return;
                 }
 
-                const document = query || store.getState()[METADATA_KEY].mutationsMap[mutationHash];
+                logger('Running update function for mutation', { document, variables });
 
                 const optimisticResponse = replaceUsingMap({ ...origOptimisticResponse }, idsMap);
                 const result = { data: optimisticResponse };
